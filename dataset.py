@@ -299,9 +299,9 @@ ORDER BY ordinal_position
         field_id = await self._field_id(field, fields=fields)
         return f"{field} = ${field_id + 1}"
 
-    def upsert_many(self, rows: List[dict], keys: List[str], chunk_size: int = 50_000):
+    def upsert_many(self, rows: List[dict], keys: List[str], update_keys: List[str] = None, chunk_size: int = 50_000):
         """Run upsert_many on DB. If record not exists, it will be inserted otherwise updated. Required index with UNIQUE for all keys fields altogether."""
-        return run_async(self.upsert_many_async(rows, keys, chunk_size))
+        return run_async(self.upsert_many_async(rows, keys, update_keys, chunk_size))
         # return asyncio.run(self.upsert_many_async(rows, keys))
 
     def update_many(self, rows: List[Any], keys: List[str], chunk_size: int = 50_000):
@@ -347,7 +347,7 @@ WHERE
             tbar.close()
 
     async def upsert_many_async(
-        self, rows: List[dict], keys: List[str], chunk_size: int = 50_000
+        self, rows: List[dict], keys: List[str], update_keys: List[str] = None, chunk_size: int = 50_000
     ):
         """Run upsert_many on DB. If record not exists, it will be inserted otherwise updated. Required index with UNIQUE for all keys fields altogether."""
         self.fields = await self._get_fields()
@@ -356,7 +356,7 @@ WHERE
         data, fields = await self._prepare_data_fields(rows)
 
         expr_set = [
-            await self._field_set(k, fields) for k in fields.keys() if not k in keys
+            await self._field_set(k, fields) for k in fields.keys() if not (k in keys) or (update_keys and k in update_keys)
         ]
         expr_where = [await self._field_set(k, fields) for k in keys]
 

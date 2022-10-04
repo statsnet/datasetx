@@ -58,5 +58,5 @@ rows = [
 # keys = ["identifier", "id1"]
 keys = ['identifier', 'jurisdiction', 'type', 'value']
 
-table.upsert_many(rows, keys)
+table.upsert_many(rows, keys, update_keys=["type", "value"])
 table.update_many(rows, keys)
