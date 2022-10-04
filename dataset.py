@@ -299,28 +299,48 @@ ORDER BY ordinal_position
         field_id = await self._field_id(field, fields=fields)
         return f"{field} = ${field_id + 1}"
 
-    def upsert_many(self, rows: List[dict], keys: List[str], update_keys: List[str] = None, chunk_size: int = 50_000):
+    def upsert_many(
+        self, rows: List[dict], keys: List[str], update_keys: List[str] = None, chunk_size: int = 50_000
+    ):
         """Run upsert_many on DB. If record not exists, it will be inserted otherwise updated. Required index with UNIQUE for all keys fields altogether."""
         return run_async(self.upsert_many_async(rows, keys, update_keys, chunk_size))
         # return asyncio.run(self.upsert_many_async(rows, keys))
 
-    def update_many(self, rows: List[Any], keys: List[str], chunk_size: int = 50_000):
+    def update_many(
+        self,
+        filters: "dict[str, Any]",
+        values: "dict[str, Any]",
+        chunk_size: int = 50_000,
+    ):
         """Run update_many on DB. Only updates already existing records."""
-        return run_async(self.update_many_async(rows, keys, chunk_size))
+        return run_async(self.update_many_async(filters, values, chunk_size))
 
     async def update_many_async(
-        self, rows: List[dict], keys: List[str], chunk_size: int = 50_000
+        self,
+        filters: "dict[str, Any]",
+        values: "dict[str, Any]",
+        chunk_size: int = 50_000,
     ):
         """Run update_many on DB. Only updates already existing records."""
         self.fields = await self._get_fields()
 
-        self._check_keys(keys)
-        data, fields = await self._prepare_data_fields(rows)
+        self._check_keys(list(filters.keys()))
+        self._check_keys(list(values.keys()))
 
-        expr_set = [
-            await self._field_set(k, fields) for k in fields.keys() if not k in keys
+        assert len(set([*filters.keys(), *values.keys()])) == len(filters) + len(
+            values
+        ), "Values and filters dicts should be unique, keys can't be in both."
+
+        fields_filters = {k: v for k, v in self.fields.items() if k in filters}
+        fields_values = {k: v for k, v in self.fields.items() if k in values}
+        fields_all = {**fields_filters, **fields_values}
+        data = [filters.get(k) or values.get(k) for k in fields_all]
+        print("Data:", data)
+
+        expr_set = [await self._field_set(k, fields_all) for k in fields_values.keys()]
+        expr_where = [
+            await self._field_set(k, fields_all) for k in fields_filters.keys()
         ]
-        expr_where = [await self._field_set(k, fields) for k in keys]
 
         expr_set_str = ",\n    ".join(expr_set)
         expr_where_str = "\n    AND ".join(expr_where)
@@ -335,19 +355,28 @@ WHERE
 
         self.log.debug(f"Query: {q}")
         if self.progressbar:
-            tbar = tqdm(desc="Update", total=len(data))
+            tbar = tqdm(desc="Update", total=None)
 
         if not self.dryrun:
-            for chunk in chunks(data, chunk_size):
-                await self.conn.executemany(q, chunk)
-                if self.progressbar:
-                    tbar.update(len(chunk))
+            updated_text = await self.conn.execute(q, *data)
+            updated_count = 1
+            try:
+                updated_count = int(updated_text.replace("UPDATE ", ""))
+            except ValueError:
+                pass
+
+            if self.progressbar:
+                tbar.update(int(updated_count))
 
         if self.progressbar:
             tbar.close()
 
     async def upsert_many_async(
-        self, rows: List[dict], keys: List[str], update_keys: List[str] = None, chunk_size: int = 50_000
+        self,
+        rows: List[dict],
+        keys: List[str],
+        update_keys: List[str] = None,
+        chunk_size: int = 50_000,
     ):
         """Run upsert_many on DB. If record not exists, it will be inserted otherwise updated. Required index with UNIQUE for all keys fields altogether."""
         self.fields = await self._get_fields()
@@ -356,7 +385,9 @@ WHERE
         data, fields = await self._prepare_data_fields(rows)
 
         expr_set = [
-            await self._field_set(k, fields) for k in fields.keys() if not (k in keys) or (update_keys and k in update_keys)
+            await self._field_set(k, fields)
+            for k in fields.keys()
+            if not (k in keys) or (update_keys and k in update_keys)
         ]
         expr_where = [await self._field_set(k, fields) for k in keys]
 
@@ -369,10 +400,17 @@ WHERE
         q = f"""
 INSERT INTO {self.db} ({fields_str})
 VALUES ({values_str})
+        """
+
+        if update_keys:
+            q += f"""
 ON CONFLICT ({expr_conflict_str}) DO UPDATE
 SET
-    {expr_set_str}
-        """
+    {expr_set_str}"""
+        else:
+            q+= f"""
+ON CONFLICT DO NOTHING
+"""
 
         #         q = f"""
         # SELECT (SELECT 1 FROM {self.db} WHERE {expr_where_str})
