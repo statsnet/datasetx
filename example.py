@@ -60,4 +60,4 @@ keys = ['identifier', 'jurisdiction', 'type', 'value']
 
 table.upsert_many(rows, keys)
 table.upsert_many(rows, keys, update_keys=["type", "value"])
-table.update_many({"jurisdiction": "kz"}, {"hidden1": "Replaced2"})
+table.update_many_filter({"jurisdiction": "kz"}, {"hidden1": "Replaced2"})

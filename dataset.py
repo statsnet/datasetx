@@ -306,16 +306,16 @@ ORDER BY ordinal_position
         return run_async(self.upsert_many_async(rows, keys, update_keys, chunk_size))
         # return asyncio.run(self.upsert_many_async(rows, keys))
 
-    def update_many(
+    def update_many_filter(
         self,
         filters: "dict[str, Any]",
         values: "dict[str, Any]",
         chunk_size: int = 50_000,
     ):
         """Run update_many on DB. Only updates already existing records."""
-        return run_async(self.update_many_async(filters, values, chunk_size))
+        return run_async(self.update_many_filter_async(filters, values, chunk_size))
 
-    async def update_many_async(
+    async def update_many_filter_async(
         self,
         filters: "dict[str, Any]",
         values: "dict[str, Any]",
@@ -370,6 +370,50 @@ WHERE
 
         if self.progressbar:
             tbar.close()
+
+
+    def update_many(self, rows: List[Any], keys: List[str], chunk_size: int = 50_000):
+        """Run update_many on DB. Only updates already existing records."""
+        return run_async(self.update_many_async(rows, keys, chunk_size))
+
+    async def update_many_async(
+        self, rows: List[dict], keys: List[str], chunk_size: int = 50_000
+    ):
+        """Run update_many on DB. Only updates already existing records."""
+        self.fields = await self._get_fields()
+
+        self._check_keys(keys)
+        data, fields = await self._prepare_data_fields(rows)
+
+        expr_set = [
+            await self._field_set(k, fields) for k in fields.keys() if not k in keys
+        ]
+        expr_where = [await self._field_set(k, fields) for k in keys]
+
+        expr_set_str = ",\n    ".join(expr_set)
+        expr_where_str = "\n    AND ".join(expr_where)
+
+        q = f"""
+UPDATE {self.db}
+SET
+    {expr_set_str}
+WHERE
+    {expr_where_str}
+"""
+
+        self.log.debug(f"Query: {q}")
+        if self.progressbar:
+            tbar = tqdm(desc="Update", total=len(data))
+
+        if not self.dryrun:
+            for chunk in chunks(data, chunk_size):
+                await self.conn.executemany(q, chunk)
+                if self.progressbar:
+                    tbar.update(len(chunk))
+
+        if self.progressbar:
+            tbar.close()
+
 
     async def upsert_many_async(
         self,
