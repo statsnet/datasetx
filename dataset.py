@@ -166,15 +166,8 @@ ORDER BY ordinal_position
     #     for item in val:
     #         yield self._convert_value(item, field_type)
 
-    async def _convert_value(self, val: Any, field_type: str) -> Any:
+    async def _convert_value(self, val: Any, field_type: str, field_name: str) -> Any:
         """Convert passed value to DB field type"""
-
-        # field_arr_regex = re.compile(r"\[\d*\]")
-        # field_arr = field_arr_regex.search(field_type)
-        # field_type_normal = field_arr_regex.sub("", field_type, count=1)
-
-        # if field_arr:
-        #     return list(await self._iter_array_type(val, field_type_normal))
 
         if field_type.startswith("char") or field_type.endswith("char"):
             return str(val)
@@ -235,19 +228,19 @@ ORDER BY ordinal_position
                     continue
 
                 try:
-                    val = await self._convert_value(row[field_name], field_type.lower())
+                    val = await self._convert_value(row[field_name], field_type.lower(), field_name)
                 except TypeError as exc:
                     raise FieldSerializationException() from exc
                 r.append(val)
 
-                if val and field_name in unused_fields:
+                if val is not None and field_name in unused_fields:
                     unused_fields.remove(field_name)
 
             res.append(r)
         return res, unused_fields
 
     async def _prepare_data_fields(
-        self, rows: List[dict], keys=None
+        self, rows: List[dict], keys=None, update_keys=None
     ) -> Tuple[list, dict]:
         """Prepare cleared data and fields dict, remove unused fields"""
         data, unused_fields = await self._prepare_data(rows)
@@ -257,10 +250,15 @@ ORDER BY ordinal_position
         if self.ignore_fields:
             unused_fields.extend(self.ignore_fields)
 
-        if keys:
-            for f in fields:
-                if not f in keys and not f in unused_fields:
-                    unused_fields.append(f)
+        # if keys: # Remove non selected keys
+        #     for f in fields:
+        #         if not f in keys and not f in unused_fields:
+        #             unused_fields.append(f)
+
+        if update_keys: # Add update keys
+            for k in update_keys:
+                if k in unused_fields:
+                    unused_fields.remove(k)
 
         # -- Delete unused fields from fields
         for f in unused_fields:
@@ -335,7 +333,6 @@ ORDER BY ordinal_position
         fields_values = {k: v for k, v in self.fields.items() if k in values}
         fields_all = {**fields_filters, **fields_values}
         data = [filters.get(k) or values.get(k) for k in fields_all]
-        print("Data:", data)
 
         expr_set = [await self._field_set(k, fields_all) for k in fields_values.keys()]
         expr_where = [
@@ -426,12 +423,14 @@ WHERE
         self.fields = await self._get_fields()
 
         self._check_keys(keys)
-        data, fields = await self._prepare_data_fields(rows)
+        if update_keys:
+            self._check_keys(update_keys)
+        data, fields = await self._prepare_data_fields(rows, update_keys=update_keys)
 
         expr_set = [
             await self._field_set(k, fields)
             for k in fields.keys()
-            if not (k in keys) or (update_keys and k in update_keys)
+            if (not update_keys and not k in keys) or (update_keys and k in update_keys)
         ]
         expr_where = [await self._field_set(k, fields) for k in keys]
 
