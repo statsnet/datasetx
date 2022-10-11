@@ -251,7 +251,7 @@ ORDER BY ordinal_position
         return res, unused_fields
 
     async def _prepare_data_fields(
-        self, rows: List[dict], keys=None, update_keys=None
+        self, rows: List[dict], keys=None, update_keys=None, remove_non_keys: bool = False
     ) -> Tuple[list, dict]:
         """Prepare cleared data and fields dict, remove unused fields"""
         data, unused_fields = await self._prepare_data(rows)
@@ -265,10 +265,10 @@ ORDER BY ordinal_position
             for f in self.force_fields:
                 unused_fields.remove(f)
 
-        # if keys: # Remove non selected keys
-        #     for f in fields:
-        #         if not f in keys and not f in unused_fields:
-        #             unused_fields.append(f)
+        if keys and remove_non_keys: # Remove non selected keys
+            for f in fields:
+                if not f in keys and not f in unused_fields:
+                    unused_fields.append(f)
 
         if update_keys:  # Add update keys
             for k in update_keys:
@@ -631,7 +631,8 @@ LIMIT {limit}"""
 
         self.fields = await self._get_fields()
         keys = await self._check_keys(keys)
-        data, fields = await self._prepare_data_fields(filters)
+        # data, unused_fields = await self._prepare_data(filters)
+        data, fields = await self._prepare_data_fields(filters, keys, remove_non_keys=True)
         fields_filters = {k: v for k, v in self.fields.items() if k in keys}
 
         expr_where = [await self._field_set(k, fields_filters) for k in keys]
