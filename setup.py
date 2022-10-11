@@ -1,0 +1,11 @@
+from setuptools import setup
+
+setup(
+    name="dataset",
+    py_modules=["dataset"],
+    description="PostgreSQL dataset export",
+    version=0.1,
+    author="Djangoner",
+    author_email="djangoner6@gmail.com",
+    keywords=["postgres", "postgreSQL", "DB", "database", "dataset"],
+)

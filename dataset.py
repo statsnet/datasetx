@@ -16,7 +16,6 @@ table.upsert(rows, ["key1", "key2"])
 """
 
 import asyncio
-import copyreg
 import json
 import logging
 import re
@@ -24,6 +23,7 @@ from collections import OrderedDict
 from copy import copy
 from datetime import datetime
 from typing import Any, Callable, Iterable, List, Tuple
+from unittest.util import strclass
 
 import asyncpg
 from asyncpg.connection import Connection
@@ -74,6 +74,7 @@ class Dataset:
     db: str = None  # Filled by cls['table_name']
     fields: dict = None
     ignore_fields: List[str] = list()  # List of fields to ignore
+    force_fields: List[str] = list()  # List of fields to force add to query
     progressbar = True  # Show tqdm progressbar
     dryrun = False  # Run in dry mode, just print query
 
@@ -118,8 +119,12 @@ class Dataset:
         if not self.db:
             raise DBEmptyException("Call dataset.connection()['table_name'] ")
 
-    def _check_keys(self, keys: List[str]):
+    async def _check_keys(self, keys: List[str]):
         """Check that all keys are valid and exists in table"""
+        if keys == "__all__":
+            fields = await self._get_fields()
+            return list(fields.keys())
+
         assert len(keys) > 0, "At least one key is required"
 
         for key in keys:
@@ -127,6 +132,8 @@ class Dataset:
                 raise InvalidKeyException(
                     f"Key '{key}' is not exists on table '{self.db}' ({self.fields.keys()})"
                 )
+
+        return keys
 
     async def _get_fields(self) -> "OrderedDict[str, str]":
         """Get dict of DB fields {name: field_type}"""
@@ -228,12 +235,16 @@ ORDER BY ordinal_position
                     continue
 
                 try:
-                    val = await self._convert_value(row[field_name], field_type.lower(), field_name)
+                    val = await self._convert_value(
+                        row[field_name], field_type.lower(), field_name
+                    )
                 except TypeError as exc:
                     raise FieldSerializationException() from exc
                 r.append(val)
 
-                if val is not None and field_name in unused_fields:
+                if field_name in unused_fields and (
+                    val is not None or val in self.force_fields
+                ):
                     unused_fields.remove(field_name)
 
             res.append(r)
@@ -250,12 +261,16 @@ ORDER BY ordinal_position
         if self.ignore_fields:
             unused_fields.extend(self.ignore_fields)
 
+        if self.force_fields:
+            for f in self.force_fields:
+                unused_fields.remove(f)
+
         # if keys: # Remove non selected keys
         #     for f in fields:
         #         if not f in keys and not f in unused_fields:
         #             unused_fields.append(f)
 
-        if update_keys: # Add update keys
+        if update_keys:  # Add update keys
             for k in update_keys:
                 if k in unused_fields:
                     unused_fields.remove(k)
@@ -297,11 +312,26 @@ ORDER BY ordinal_position
         field_id = await self._field_id(field, fields=fields)
         return f"{field} = ${field_id + 1}"
 
+    def escapestr(self, tx: str, char: str = '"') -> str:
+        esc = lambda x: f"{char}{x}{char}"
+
+        if isinstance(tx, (list, tuple)):
+            return list(map(esc, tx))
+        else:
+            return esc(tx)
+
     def upsert_many(
-        self, rows: List[dict], keys: List[str], update_keys: List[str] = None, chunk_size: int = 50_000
+        self,
+        rows: List[dict],
+        keys: List[str],
+        update_keys: List[str] = None,
+        id_columns: List[str] = None,
+        chunk_size: int = 50_000,
     ):
         """Run upsert_many on DB. If record not exists, it will be inserted otherwise updated. Required index with UNIQUE for all keys fields altogether."""
-        return run_async(self.upsert_many_async(rows, keys, update_keys, chunk_size))
+        return run_async(
+            self.upsert_many_async(rows, keys, update_keys, id_columns, chunk_size)
+        )
         # return asyncio.run(self.upsert_many_async(rows, keys))
 
     def update_many_filter(
@@ -322,8 +352,8 @@ ORDER BY ordinal_position
         """Run update_many on DB. Only updates already existing records."""
         self.fields = await self._get_fields()
 
-        self._check_keys(list(filters.keys()))
-        self._check_keys(list(values.keys()))
+        await self._check_keys(list(filters.keys()))
+        await self._check_keys(list(values.keys()))
 
         assert len(set([*filters.keys(), *values.keys()])) == len(filters) + len(
             values
@@ -368,7 +398,6 @@ WHERE
         if self.progressbar:
             tbar.close()
 
-
     def update_many(self, rows: List[Any], keys: List[str], chunk_size: int = 50_000):
         """Run update_many on DB. Only updates already existing records."""
         return run_async(self.update_many_async(rows, keys, chunk_size))
@@ -379,7 +408,7 @@ WHERE
         """Run update_many on DB. Only updates already existing records."""
         self.fields = await self._get_fields()
 
-        self._check_keys(keys)
+        await self._check_keys(keys)
         data, fields = await self._prepare_data_fields(rows)
 
         expr_set = [
@@ -411,20 +440,23 @@ WHERE
         if self.progressbar:
             tbar.close()
 
-
     async def upsert_many_async(
         self,
         rows: List[dict],
         keys: List[str],
         update_keys: List[str] = None,
+        id_columns: List[str] = None,
         chunk_size: int = 50_000,
     ):
         """Run upsert_many on DB. If record not exists, it will be inserted otherwise updated. Required index with UNIQUE for all keys fields altogether."""
         self.fields = await self._get_fields()
 
-        self._check_keys(keys)
+        if id_columns:
+            await self._check_keys(id_columns)
+
+        keys = await self._check_keys(keys)
         if update_keys:
-            self._check_keys(update_keys)
+            update_keys = await self._check_keys(update_keys)
         data, fields = await self._prepare_data_fields(rows, update_keys=update_keys)
 
         expr_set = [
@@ -437,7 +469,7 @@ WHERE
         expr_set_str = ",\n    ".join(expr_set)
         expr_where_str = "\n    AND ".join(expr_where)
         expr_conflict_str = ", ".join(keys)
-        fields_str = ", ".join(fields.keys())
+        fields_str = ", ".join(self.escapestr(list(fields.keys())))
         values_str = ", ".join([f"${i+1}" for i in range(len(fields))])
 
         q = f"""
@@ -451,7 +483,7 @@ ON CONFLICT ({expr_conflict_str}) DO UPDATE
 SET
     {expr_set_str}"""
         else:
-            q+= f"""
+            q += f"""
 ON CONFLICT DO NOTHING
 """
 
@@ -471,3 +503,159 @@ ON CONFLICT DO NOTHING
 
         if self.progressbar:
             tbar.close()
+
+        # if id_columns:
+        #     fields_column = [i for i, f in enumerate(fields) if f in id_columns]
+        #     return await self.select_async(
+        #         id_columns,
+        #         filters={k: None for k in id_columns},
+        #         filters_many=[f for i, f in enumerate(data) if i in fields_column],
+        #         limit=None,
+        #     )
+
+    def insert_many(
+        self, rows: List[dict], keys: List[str], id_column: str = None
+    ) -> List[int]:
+        return run_async(self.insert_many_async(rows, keys, id_column=id_column))
+
+    async def insert_many_async(
+        self, rows: List[dict], keys: List[str], id_column: str = None
+    ) -> List[int]:
+        """Run many inserts on DB."""
+
+        self.fields = await self._get_fields()
+        keys = await self._check_keys(keys)
+        data, fields = await self._prepare_data_fields(rows, keys)
+
+        fields_str = ", ".join(self.escapestr(list(fields.keys())))
+        values_str = ", ".join([f"${i+1}" for i in range(len(fields))])
+
+        q = f"""
+INSERT INTO {self.db} ({fields_str})
+VALUES ({values_str})
+"""
+        if id_column is not None:
+            q += f"RETURNING {id_column}"
+
+        self.log.debug(f"Query: {q}")
+        if self.progressbar:
+            tbar = tqdm(desc="Insert", total=len(data))
+
+        return_ids = []
+
+        if not self.dryrun:
+            for item in data:
+                r = await self.conn.fetch(q, *item)
+                if id_column:
+                    return_ids.append(list(r[0].values())[0])
+                if self.progressbar:
+                    tbar.update(1)
+
+        if self.progressbar:
+            tbar.close()
+
+        return return_ids
+
+    def select(
+        self,
+        keys: List[dict],
+        filters: "dict[str, Any]",
+        filters_many: List = None,
+        limit: int = None,
+    ):
+        return run_async(self.select_async(keys, filters, filters_many, limit))
+
+    async def select_async(
+        self,
+        keys: List[dict],
+        filters: "dict[str, Any]",
+        filters_many: List = None,
+        limit: int = None,
+    ) -> dict:
+
+        self.fields = await self._get_fields()
+        keys = await self._check_keys(keys)
+        fields_filters = {k: v for k, v in self.fields.items() if k in filters}
+
+        fields_str = ", ".join(self.escapestr(list(keys)))
+        expr_where = [await self._field_set(k, fields_filters) for k in filters.keys()]
+        expr_where_str = "\n    AND ".join(expr_where)
+
+        q = f"""
+SELECT ({fields_str}) FROM {self.db} """
+
+        if filters:
+            q += f"""
+WHERE
+    {expr_where_str}"""
+
+        if limit:
+            q += f"""
+LIMIT {limit}"""
+
+        self.log.debug(f"Query: {q}")
+        res = []
+        if self.progressbar:
+            tbar = tqdm(desc="Select", total=None)
+
+        if not self.dryrun:
+            data_values = list(filters.values())
+            r = await self.conn.fetch(q, *data_values)
+
+            for item in r:
+                fields = item.get("row", list(item.values()))
+                res.append({keys[i]: v for i, v in enumerate(fields)})
+
+            if self.progressbar:
+                tbar.update(len(r))
+
+        if self.progressbar:
+            tbar.close()
+
+        return res
+
+    def delete_many(
+        self,
+        keys: List[dict],
+        filters: "List[dict[str, Any]]",
+        chunk_size: int = 10_000
+    ):
+        return run_async(self.delete_many_async(keys, filters, chunk_size))
+
+    async def delete_many_async(
+        self,
+        keys: List[dict],
+        filters: "dict[str, Any]",
+        chunk_size: int = 10_000
+    ) -> dict:
+
+        self.fields = await self._get_fields()
+        keys = await self._check_keys(keys)
+        data, fields = await self._prepare_data_fields(filters)
+        fields_filters = {k: v for k, v in self.fields.items() if k in keys}
+
+        expr_where = [await self._field_set(k, fields_filters) for k in keys]
+        expr_where_str = "\n    AND ".join(expr_where)
+
+        q = f"""
+DELETE FROM {self.db}
+WHERE
+    {expr_where_str}
+"""
+
+        self.log.debug(f"Query: {q}")
+        res = []
+        if self.progressbar:
+            tbar = tqdm(desc="Delete", total=len(data))
+
+        if not self.dryrun:
+            for chunk in chunks(data, chunk_size):
+                await self.conn.executemany(q, chunk)
+
+                if self.progressbar:
+                    tbar.update(len(chunk))
+
+        if self.progressbar:
+            tbar.close()
+
+        return res
