@@ -214,7 +214,7 @@ class BotProgressReport:
         """Set total items count for progress bar"""
         self.total = total
         self.pbar.total = total
-        self.pbar.miniters = int(total / 100 * self.min_percent)
+        self.pbar.miniters = int(total / 100 * (self.min_percent or 1))
 
     async def start(self):
         """Start progress sending"""
@@ -264,9 +264,9 @@ class BotProgressReport:
         """Update progress status"""
         if self._is_enabled:
             self.completed += count
-            self.log.debug(
-                f"Updated progress by {count}, now: {self.completed} / {self.total}"
-            )
+            # self.log.debug(
+            #     f"Updated progress by {count}, now: {self.completed} / {self.total}"
+            # )
             self.pbar.update(count)
 
     async def _tqdm_callback(self, bar_text: Optional[str] = None):
@@ -381,8 +381,11 @@ class Dataset:
 
     def _bot_init(self, bot: BotProgressReport):
         bot.enable = self.bot_enable
-        if bot.title and self.title:
-            bot.title += f" - {self.title}"
+        if bot.title:
+            if self.title:
+                bot.title += f" - {self.title}"
+            else:
+                bot.title += f" - {self.db}"
 
     def __getitem__(self, __name: str) -> "Dataset":
         """Get DB table"""
