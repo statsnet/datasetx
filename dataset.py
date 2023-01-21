@@ -87,6 +87,7 @@ class BotProgressReport:
     total: Optional[int] = 0
     completed: int = 0
     bar_width: Optional[int] = int(os.getenv("BAR_WIDTH", 80))
+    min_percent: Optional[int] = int(os.getenv("MINPERCENT", 1))
     state_icons = {
         False: "🔴",
         True: "🟢",
@@ -133,7 +134,7 @@ class BotProgressReport:
             }
         )
         if not "mininterval" in params:
-            params["mininterval"] = 2
+            params["mininterval"] = int(os.getenv("MININTERVAL", 2))
         self.pbar = tqdm_asyncio(**params)
         if total:
             self.set_total(total)
@@ -213,7 +214,7 @@ class BotProgressReport:
         """Set total items count for progress bar"""
         self.total = total
         self.pbar.total = total
-        self.pbar.miniters = int(total / 100)
+        self.pbar.miniters = int(total / 100 * self.min_percent)
 
     async def start(self):
         """Start progress sending"""
