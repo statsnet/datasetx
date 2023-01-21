@@ -16,38 +16,31 @@ table.upsert_many(rows, ["key1", "key2"])
 """
 
 import asyncio
+import functools
 import json
 import logging
+import os
 import re
+import warnings
 from collections import OrderedDict
 from copy import copy
 from datetime import datetime, timedelta
-from typing import Any, Callable, Coroutine, Iterable, List, Tuple
-import asyncio
-from datetime import datetime
-import functools
-import logging
-import os
-from typing import Optional
-import warnings
-from dotenv import load_dotenv
-from aiogram.bot import Bot
-from tqdm.asyncio import tqdm_asyncio
-from pytz import UnknownTimeZoneError, timezone
+from typing import Any, Callable, Coroutine, Iterable, List, Optional, Tuple
+
 import asyncpg
+from aiogram.bot import Bot
 from asyncpg.connection import Connection
+from dotenv import load_dotenv
+from pytz import UnknownTimeZoneError, timezone
 from tqdm import tqdm
+from tqdm.asyncio import tqdm_asyncio
 
 warnings.simplefilter("ignore", DeprecationWarning)
 
 logging.basicConfig()
 
-try:
-    from dotenv import load_dotenv
-
-    load_dotenv()
-except:
-    pass
+dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
+load_dotenv(dotenv_path)
 
 
 class DatasetException(ValueError):
@@ -185,16 +178,20 @@ class BotProgressReport:
         r = []
         for i in str(td).split(":"):
             r.append(str(int(float(i))).zfill(2))
-        return ':'.join(r)
+        return ":".join(r)
 
     def _template(self, after: str = "", before: str = ""):
         """Message template"""
         if self.finished_at and self.started_at:
-            last_run_text = f"*Время завершения*: `{self._format_date(self.finished_at)}`"
+            last_run_text = (
+                f"*Время завершения*: `{self._format_date(self.finished_at)}`"
+            )
             timedelta_str = self._timedelta_str(self.finished_at - self.started_at)
             last_run_text += f"\n*Прошло времени*: `{timedelta_str}`"
         else:
-            last_run_text = f"*Последнее обновление*: `{self._format_date(self._now())}`"
+            last_run_text = (
+                f"*Последнее обновление*: `{self._format_date(self._now())}`"
+            )
 
         return f"""
 {before}
@@ -368,7 +365,7 @@ class Dataset:
     progressbar = True  # Show tqdm progressbar
     dryrun = False  # Run in dry mode, just print query
     title: Optional[str] = None  # Task title in telegram bot
-    bot_enable: bool = True # Enable bot notifications
+    bot_enable: bool = True  # Enable bot notifications
 
     def __init__(
         self, log_level: Optional[str] = None, title: Optional[str] = None
@@ -378,7 +375,7 @@ class Dataset:
         if title:
             self.title = title
 
-    def set_title(self, title:str):
+    def set_title(self, title: str):
         self.title = title
 
     def _bot_init(self, bot: BotProgressReport):
