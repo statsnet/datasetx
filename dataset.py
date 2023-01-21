@@ -42,12 +42,8 @@ warnings.simplefilter("ignore", DeprecationWarning)
 
 logging.basicConfig()
 
-try:
-    from dotenv import load_dotenv
-
-    load_dotenv()
-except:
-    pass
+dotenv_path = join(dirname(__file__), '.env')
+load_dotenv(dotenv_path)
 
 
 class DatasetException(ValueError):
