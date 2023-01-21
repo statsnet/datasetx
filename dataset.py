@@ -4,13 +4,13 @@ Example:
 
 ```python
 db = dataset.connect("postgres://localhost/test")
-table = db["test_example"]
+table = db["table"]
 rows = [
     {
         "field": "value",
     }
 ]
-table.upsert(rows, ["key1", "key2"])
+table.upsert_many(rows, ["key1", "key2"])
 ```
 
 """
@@ -21,15 +21,33 @@ import logging
 import re
 from collections import OrderedDict
 from copy import copy
+from datetime import datetime, timedelta
+from typing import Any, Callable, Coroutine, Iterable, List, Tuple
+import asyncio
 from datetime import datetime
-from typing import Any, Callable, Iterable, List, Tuple
-from unittest.util import strclass
-
+import functools
+import logging
+import os
+from typing import Optional
+import warnings
+from dotenv import load_dotenv
+from aiogram.bot import Bot
+from tqdm.asyncio import tqdm_asyncio
+from pytz import UnknownTimeZoneError, timezone
 import asyncpg
 from asyncpg.connection import Connection
 from tqdm import tqdm
 
+warnings.simplefilter("ignore", DeprecationWarning)
+
 logging.basicConfig()
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except:
+    pass
 
 
 class DatasetException(ValueError):
@@ -48,7 +66,279 @@ class FieldSerializationException(DatasetException):
     pass
 
 
-def connect(url: str, *args, log_level: str = None, **kwargs):
+class _WrapCallback:
+    def __init__(self, callback):
+        self.callback = callback
+        self.text = self.prev_text = "<< Init tqdm >>"
+
+    def write(self, s):
+        new_text = s.strip().replace("\r", "").replace("\n", "")
+        if len(new_text) != 0:
+            self.text = new_text
+
+    def flush(self):
+        if self.prev_text != self.text:
+            loop = asyncio.get_event_loop()
+            asyncio.ensure_future(self.callback(self.text), loop=loop)
+            self.prev_text = self.text
+
+
+class BotProgressReport:
+    """Telegram bot progress report"""
+
+    enable = True
+    started = False
+    finished = False
+    bot_token = os.getenv("BOT_TOKEN")
+    bot_chat = os.getenv("BOT_CHAT")
+    total: Optional[int] = 0
+    completed: int = 0
+    bar_width: Optional[int] = int(os.getenv("BAR_WIDTH", 80))
+    state_icons = {
+        False: "🔴",
+        True: "🟢",
+        None: "🟡",
+    }
+
+    bot: Optional[Bot] = None
+    msg_id: Optional[int] = None
+    title: Optional[str] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    error: bool = False
+    exception: Optional[Exception] = None
+    last_text: Optional[str] = None
+    last_bar: Optional[str] = None
+
+    notif_progress: bool = bool(os.getenv("BOT_PROGRESS", "true") == "true")
+    notif_end_split: bool = bool(os.getenv("BOT_END_SPLIT", "false") == "true")
+    timezone = None
+    log = logging.getLogger("BotProgress")
+
+    def __init__(self, title: str, total: Optional[int], **kwargs):
+        if not self.bot_token:
+            warnings.warn(
+                "BOT_TOKEN environment variable is empty, telegram notifications disabled"
+            )
+        if not self.bot_chat:
+            warnings.warn(
+                "BOT_CHAT environment variable is empty, telegram notifications disabled"
+            )
+
+        self.title = title
+        self.log.setLevel(os.getenv("LOG_LEVEL", "INFO"))
+
+        self.callback = _WrapCallback(self._tqdm_callback)
+
+        params = kwargs.copy()
+        params.update(
+            {
+                "file": self.callback,
+                "ascii": False,
+                "ncols": self.bar_width,
+                "unit_scale": True,
+            }
+        )
+        if not "mininterval" in params:
+            params["mininterval"] = 2
+        self.pbar = tqdm_asyncio(**params)
+        if total:
+            self.set_total(total)
+        self._init()
+
+        raw_timezone = os.getenv("TIMEZONE", "UTC")
+        try:
+            self.timezone = timezone(raw_timezone)
+        except UnknownTimeZoneError as e:
+            self.log.warning(f"Invalid timezone: {raw_timezone}", exc_info=e)
+
+    @property
+    def _is_enabled(self) -> bool:
+        return bool(self.enable and self.bot_token and self.bot_chat)
+
+    def _init(self):
+        if not self._is_enabled:
+            return
+
+        assert self.bot_token is not None, "Bot token is required"
+        self.bot = Bot(token=self.bot_token, parse_mode="MarkdownV2")
+
+    def _now(self) -> datetime:
+        return datetime.now(tz=self.timezone)
+
+    def _format_date(self, date: Optional[datetime]) -> Optional[str]:
+        """Readable date format"""
+        if not date:
+            return None
+        return date.strftime("%Y.%m.%d %H:%M:%S")
+
+    def _state_icon(self) -> str:
+        """Current state icon"""
+        if self.error:
+            return self.state_icons[False]
+        elif self.finished or self.finished_at:
+            return self.state_icons[True]
+
+        return self.state_icons[None]
+
+    def _timedelta_str(self, td: timedelta) -> str:
+        r = []
+        for i in str(td).split(":"):
+            r.append(str(int(float(i))).zfill(2))
+        return ':'.join(r)
+
+    def _template(self, after: str = "", before: str = ""):
+        """Message template"""
+        if self.finished_at and self.started_at:
+            last_run_text = f"*Время завершения*: `{self._format_date(self.finished_at)}`"
+            timedelta_str = self._timedelta_str(self.finished_at - self.started_at)
+            last_run_text += f"\n*Прошло времени*: `{timedelta_str}`"
+        else:
+            last_run_text = f"*Последнее обновление*: `{self._format_date(self._now())}`"
+
+        return f"""
+{before}
+{self._state_icon()} *Задача*: `{self.title}`
+*Время запуска*: `{self._format_date(self.started_at)}`
+{last_run_text}
+
+{after}
+""".strip()
+
+    def _tg_escape(self, text: str) -> str:
+        """Escaping progress bar special characters"""
+        escape = list("[*_`")
+        for symb in escape:
+            text = text.replace(symb, "\\" + symb)
+        return text
+
+    def set_total(self, total: int):
+        """Set total items count for progress bar"""
+        self.total = total
+        self.pbar.total = total
+        self.pbar.miniters = int(total / 100)
+
+    async def start(self):
+        """Start progress sending"""
+        if self._is_enabled and not self.started and not self.finished:
+            self.started = True
+            self.started_at = self._now()
+            self.log.info(f"Started progress report at {self.started_at}")
+
+    async def stop(
+        self,
+        error: bool = False,
+        send_error: bool = True,
+        finish_tasks: bool = True,
+        finish_tasks_count: int = 1,
+        exc: Optional[Exception] = None,
+    ):
+        """Stop progress sending"""
+        if self._is_enabled and self.started and not self.finished:
+            assert self.bot_chat is not None
+            assert self.bot is not None
+
+            self.finished = True
+            self.error = error
+            if exc:
+                self.exception = exc
+            # self.pbar.close(leave=False)
+            if self.notif_end_split:
+                await self.bot.send_message(
+                    self.bot_chat,
+                    f"Выгрузка `{self.title}` завершена.",
+                    reply_to_message_id=self.msg_id,
+                )
+
+            self.log.info(f"Finished progress report at {self._now()}")
+            self.pbar.close()
+            await self.bot.close()
+
+            # Finish event loop tasks
+            if finish_tasks:
+                while len(asyncio.all_tasks()) > finish_tasks_count:
+                    self.log.info(
+                        f"Finishing {len(asyncio.all_tasks()) - finish_tasks_count} tasks..."
+                    )
+                    await asyncio.sleep(1)
+
+    async def update(self, count: int):
+        """Update progress status"""
+        if self._is_enabled:
+            self.completed += count
+            self.log.debug(
+                f"Updated progress by {count}, now: {self.completed} / {self.total}"
+            )
+            self.pbar.update(count)
+
+    async def _tqdm_callback(self, bar_text: Optional[str] = None):
+        """Messages logic on bar update"""
+        if not self._is_enabled:
+            return
+        assert self.bot is not None
+        assert self.bot_chat is not None
+
+        if not bar_text:
+            bar_text = self.last_bar or ""
+
+        if not self.finished_at and "100%" in bar_text:
+            self.finished_at = self._now()
+        else:
+            if self.msg_id and not self.notif_progress:
+                return
+
+        # bar_text = self._tg_escape(bar_text).ljust(self.bar_width or 100)
+        bar_text = f"`{bar_text}`"
+        if self.exception:
+            exc_cls = get_full_class_name(self.exception)
+            exc_str = str(self.exception)
+            exc_tx = self._tg_escape(f"{exc_cls}: {exc_str}").replace("|", "\\|")
+            bar_text += f"\n*Exception*:\n`{exc_tx}`"
+
+        text = self._template(after=bar_text if self.notif_progress else "")
+        self.last_text = text
+        self.last_bar = bar_text
+        self.log.debug(f"Update text: {text}")
+
+        if self.msg_id:
+            await self.bot.edit_message_text(text, self.bot_chat, self.msg_id)
+        else:
+            msg = await self.bot.send_message(self.bot_chat, text)
+            self.msg_id = msg.message_id
+
+    on_end = stop
+    on_finish = stop
+
+
+def get_full_class_name(obj):
+    module = obj.__class__.__module__
+    if module is None or module == str.__class__.__module__:
+        return obj.__class__.__name__
+    return module + "." + obj.__class__.__name__
+
+
+def progress_decorator(title: str):
+    def wrapper(func):
+        @functools.wraps(func)
+        async def wrapped(*args, **kwargs):
+            bot = BotProgressReport(title=title, total=0)
+            kwargs["bot"] = bot
+            await bot.start()
+            try:
+                r = await func(*args, **kwargs)
+            except Exception as e:
+                await bot.stop(error=True, exc=e)
+                raise e
+
+            await bot.stop()
+            return r
+
+        return wrapped
+
+    return wrapper
+
+
+def connect(url: str, *args, log_level: Optional[str] = None, **kwargs):
     """Connect to PostgreSQL DB"""
 
     ds = Dataset(log_level=log_level)
@@ -56,7 +346,7 @@ def connect(url: str, *args, log_level: str = None, **kwargs):
     return ds
 
 
-def run_async(func: Callable):
+def run_async(func: Coroutine):
     """Run async command as sync"""
     loop = asyncio.get_event_loop()
     return loop.run_until_complete(func)
@@ -69,18 +359,32 @@ def chunks(lst: Iterable, n: int):
 
 
 class Dataset:
-    conn: Connection = None
-    conn_url: str = None
-    db: str = None  # Filled by cls['table_name']
-    fields: dict = None
+    conn: Optional[Connection] = None
+    conn_url: Optional[str] = None
+    db: Optional[str] = None  # Filled by cls['table_name']
+    fields: Optional[dict] = None
     ignore_fields: List[str] = list()  # List of fields to ignore
     force_fields: List[str] = list()  # List of fields to force add to query
     progressbar = True  # Show tqdm progressbar
     dryrun = False  # Run in dry mode, just print query
+    title: Optional[str] = None  # Task title in telegram bot
+    bot_enable: bool = True # Enable bot notifications
 
-    def __init__(self, log_level: str = None) -> None:
+    def __init__(
+        self, log_level: Optional[str] = None, title: Optional[str] = None
+    ) -> None:
         self.log = logging.getLogger("Dataset")
         self.log.setLevel(log_level or "INFO")
+        if title:
+            self.title = title
+
+    def set_title(self, title:str):
+        self.title = title
+
+    def _bot_init(self, bot: BotProgressReport):
+        bot.enable = self.bot_enable
+        if bot.title and self.title:
+            bot.title += f" - {self.title}"
 
     def __getitem__(self, __name: str) -> "Dataset":
         """Get DB table"""
@@ -112,7 +416,8 @@ class Dataset:
 
     async def disconnect_async(self):
         self.log.debug("Disconnecting from DB")
-        return await self.conn.close()
+        if self.conn:
+            return await self.conn.close()
 
     def _check_table(self):
         """Check is table selected"""
@@ -154,6 +459,7 @@ ORDER BY ordinal_position
 
             res[key] = val
 
+        # res = OrderedDict([('inactive', 'boolean'), ('test_string', 'character varying'), ('identifier', 'character varying'), ('jurisdiction', 'character varying'), ('id1', 'integer'), ('date', 'date'), ('auto_id', 'integer'), ('company_id', 'character varying'), ('name_en', 'character varying'), ('name_native', 'character varying'), ('start_date', 'date'), ('end_date', 'date'), ('role', 'character varying'), ('name', 'character varying')])
         self.log.debug(f"Parsed fields from DB: {res}")
         if not res:
             raise DBEmptyException(f"Table '{self.db}' fields are not found!")
@@ -251,9 +557,13 @@ ORDER BY ordinal_position
         return res, unused_fields
 
     async def _prepare_data_fields(
-        self, rows: List[dict], keys=None, update_keys=None, remove_non_keys: bool = False
+        self,
+        rows: List[dict],
+        keys=None,
+        update_keys=None,
+        remove_non_keys: bool = False,
     ) -> Tuple[list, dict]:
-        """Prepare cleared data and fields dict, remove unused fields"""
+        """Prepare cleaned data and fields dict, remove unused fields"""
         data, unused_fields = await self._prepare_data(rows)
         fields = self.fields.copy()
         remove_ids = []
@@ -265,7 +575,7 @@ ORDER BY ordinal_position
             for f in self.force_fields:
                 unused_fields.remove(f)
 
-        if keys and remove_non_keys: # Remove non selected keys
+        if keys and remove_non_keys:  # Remove non selected keys
             for f in fields:
                 if not f in keys and not f in unused_fields:
                     unused_fields.append(f)
@@ -308,11 +618,12 @@ ORDER BY ordinal_position
         return 0
 
     async def _field_set(self, field: str, fields: List[str] = None) -> str:
-        """Field set SQL expression generation"""
+        """Generate field set SQL expression"""
         field_id = await self._field_id(field, fields=fields)
         return f"{field} = ${field_id + 1}"
 
     def escapestr(self, tx: str, char: str = '"') -> str:
+        """Escape string (column name) by quotes"""
         esc = lambda x: f"{char}{x}{char}"
 
         if isinstance(tx, (list, tuple)):
@@ -324,13 +635,27 @@ ORDER BY ordinal_position
         self,
         rows: List[dict],
         keys: List[str],
+        unique_keys: List[str] = None,
         update_keys: List[str] = None,
         id_columns: List[str] = None,
         chunk_size: int = 50_000,
     ):
-        """Run upsert_many on DB. If record not exists, it will be inserted otherwise updated. Required index with UNIQUE for all keys fields altogether."""
+        """
+        Upsert many records in DB. If record not exists, it will be inserted otherwise updated. Required index with UNIQUE for all keys fields altogether
+        ### Examples:
+        >>> rows = [{'id': 1, 'is_active': True}, {'id': 2, 'is_active': False}]
+        >>> db = dataset.connect("postgres://localhost/test")
+        >>> db['table'].upsert_many(rows, ['id', 'is_active'])
+        """
         return run_async(
-            self.upsert_many_async(rows, keys, update_keys, id_columns, chunk_size)
+            self.upsert_many_async(
+                rows,
+                keys,
+                unique_keys=unique_keys,
+                update_keys=update_keys,
+                id_columns=id_columns,
+                chunk_size=chunk_size,
+            )
         )
         # return asyncio.run(self.upsert_many_async(rows, keys))
 
@@ -340,18 +665,27 @@ ORDER BY ordinal_position
         values: "dict[str, Any]",
         chunk_size: int = 50_000,
     ):
-        """Run update_many on DB. Only updates already existing records."""
+        """
+        Update many records in DB by filters
+        ### Examples:
+        >>> db = dataset.connect("postgres://localhost/test")
+        >>> db['table'].update_many_filter({'id': 1}, {'is_active': False})
+        """
         return run_async(self.update_many_filter_async(filters, values, chunk_size))
 
+    @progress_decorator("update_many_filter")
     async def update_many_filter_async(
         self,
         filters: "dict[str, Any]",
         values: "dict[str, Any]",
         chunk_size: int = 50_000,
+        bot: Optional[BotProgressReport] = None,
     ):
         """Run update_many on DB. Only updates already existing records."""
-        self.fields = await self._get_fields()
+        assert bot is not None
+        self._bot_init(bot)
 
+        self.fields = await self._get_fields()
         await self._check_keys(list(filters.keys()))
         await self._check_keys(list(values.keys()))
 
@@ -392,6 +726,7 @@ WHERE
             except ValueError:
                 pass
 
+            await bot.update(int(updated_count))
             if self.progressbar:
                 tbar.update(int(updated_count))
 
@@ -400,14 +735,28 @@ WHERE
 
     def update_many(self, rows: List[Any], keys: List[str], chunk_size: int = 50_000):
         """Run update_many on DB. Only updates already existing records."""
+        """
+        Update many records in DB by keys values.
+        ### Examples:
+        >>> rows = [{'id': 1, 'is_active': True}, {'id': 2, 'is_active': False}]
+        >>> db = dataset.connect("postgres://localhost/test")
+        >>> db['table'].update_many(rows, ['id'])
+        """
         return run_async(self.update_many_async(rows, keys, chunk_size))
 
+    @progress_decorator("update_many")
     async def update_many_async(
-        self, rows: List[dict], keys: List[str], chunk_size: int = 50_000
+        self,
+        rows: List[dict],
+        keys: List[str],
+        chunk_size: int = 50_000,
+        bot: Optional[BotProgressReport] = None,
     ):
         """Run update_many on DB. Only updates already existing records."""
-        self.fields = await self._get_fields()
+        assert bot is not None
+        self._bot_init(bot)
 
+        self.fields = await self._get_fields()
         await self._check_keys(keys)
         data, fields = await self._prepare_data_fields(rows)
 
@@ -428,30 +777,38 @@ WHERE
 """
 
         self.log.debug(f"Query: {q}")
+        bot.set_total(len(data))
         if self.progressbar:
             tbar = tqdm(desc="Update", total=len(data))
 
         if not self.dryrun:
             for chunk in chunks(data, chunk_size):
                 await self.conn.executemany(q, chunk)
+                await bot.update(len(chunk))
                 if self.progressbar:
                     tbar.update(len(chunk))
 
         if self.progressbar:
             tbar.close()
 
+    @progress_decorator("upsert_many")
     async def upsert_many_async(
         self,
         rows: List[dict],
         keys: List[str],
+        unique_keys: List[str] = None,
         update_keys: List[str] = None,
         id_columns: List[str] = None,
         chunk_size: int = 50_000,
+        bot: Optional[BotProgressReport] = None,
     ):
         """Run upsert_many on DB. If record not exists, it will be inserted otherwise updated. Required index with UNIQUE for all keys fields altogether."""
-        self.fields = await self._get_fields()
+        assert bot is not None
+        self._bot_init(bot)
 
+        self.fields = await self._get_fields()
         if id_columns:
+            print("---", id_columns)
             await self._check_keys(id_columns)
 
         keys = await self._check_keys(keys)
@@ -468,7 +825,7 @@ WHERE
 
         expr_set_str = ",\n    ".join(expr_set)
         expr_where_str = "\n    AND ".join(expr_where)
-        expr_conflict_str = ", ".join(keys)
+        expr_conflict_str = ", ".join(unique_keys or keys)
         fields_str = ", ".join(self.escapestr(list(fields.keys())))
         values_str = ", ".join([f"${i+1}" for i in range(len(fields))])
 
@@ -492,12 +849,14 @@ ON CONFLICT DO NOTHING
         # """
 
         self.log.debug(f"Query: {q}")
+        bot.set_total(len(data))
         if self.progressbar:
             tbar = tqdm(desc="Upsert", total=len(data))
 
         if not self.dryrun:
             for chunk in chunks(data, chunk_size):
                 await self.conn.executemany(q, chunk)
+                await bot.update(len(chunk))
                 if self.progressbar:
                     tbar.update(len(chunk))
 
@@ -514,14 +873,29 @@ ON CONFLICT DO NOTHING
         #     )
 
     def insert_many(
-        self, rows: List[dict], keys: List[str], id_column: str = None
+        self, rows: List[dict], keys: List[str], id_column: Optional[str] = None
     ) -> List[int]:
+        """
+        Insert many records in DB. Slower than upsert_many, but returns id_column value.
+        ### Examples:
+        >>> rows = [{'id': 1, 'is_active': True}, {'id': 2, 'is_active': False}]
+        >>> db = dataset.connect("postgres://localhost/test")
+        >>> db['table'].insert_many(rows, ['id', 'is_active'])
+        """
         return run_async(self.insert_many_async(rows, keys, id_column=id_column))
 
+    @progress_decorator("insert_many")
     async def insert_many_async(
-        self, rows: List[dict], keys: List[str], id_column: str = None
+        self,
+        rows: List[dict],
+        keys: List[str],
+        id_column: Optional[str] = None,
+        bot: Optional[BotProgressReport] = None,
     ) -> List[int]:
         """Run many inserts on DB."""
+        assert bot is not None
+        self._bot_init(bot)
+        bot.pbar.miniters = 10
 
         self.fields = await self._get_fields()
         keys = await self._check_keys(keys)
@@ -538,6 +912,7 @@ VALUES ({values_str})
             q += f"RETURNING {id_column}"
 
         self.log.debug(f"Query: {q}")
+        bot.set_total(len(data))
         if self.progressbar:
             tbar = tqdm(desc="Insert", total=len(data))
 
@@ -548,6 +923,7 @@ VALUES ({values_str})
                 r = await self.conn.fetch(q, *item)
                 if id_column:
                     return_ids.append(list(r[0].values())[0])
+                await bot.update(1)
                 if self.progressbar:
                     tbar.update(1)
 
@@ -558,27 +934,38 @@ VALUES ({values_str})
 
     def select(
         self,
-        keys: List[dict],
+        keys: List[str],
         filters: "dict[str, Any]",
-        filters_many: List = None,
-        limit: int = None,
-    ):
+        filters_many: Optional[List] = None,
+        limit: Optional[int] = None,
+    ) -> List[dict]:
+        """
+        Select data from DB
+        ### Examples:
+        >>> db = dataset.connect("postgres://localhost/test")
+        >>> db['table'].select(['id'], {'is_active': True})
+        >>> db['table'].select(['id', 'is_active'], {'is_active': True})
+        """
         return run_async(self.select_async(keys, filters, filters_many, limit))
 
     async def select_async(
         self,
-        keys: List[dict],
+        keys: List[str],
         filters: "dict[str, Any]",
         filters_many: List = None,
         limit: int = None,
-    ) -> dict:
+    ) -> List[dict]:
 
         self.fields = await self._get_fields()
         keys = await self._check_keys(keys)
         fields_filters = {k: v for k, v in self.fields.items() if k in filters}
 
         fields_str = ", ".join(self.escapestr(list(keys)))
-        expr_where = [await self._field_set(k, fields_filters) for k in filters.keys()]
+        expr_where = [
+            await self._field_set(k, fields_filters)
+            for k in self.fields.keys()
+            if k in filters
+        ]
         expr_where_str = "\n    AND ".join(expr_where)
 
         q = f"""
@@ -593,13 +980,14 @@ WHERE
             q += f"""
 LIMIT {limit}"""
 
+        data_values = [filters[f] for f in fields_filters if f in filters]
         self.log.debug(f"Query: {q}")
+        self.log.debug(f"Data prepaired: ({data_values})")
         res = []
         if self.progressbar:
             tbar = tqdm(desc="Select", total=None)
 
         if not self.dryrun:
-            data_values = list(filters.values())
             r = await self.conn.fetch(q, *data_values)
 
             for item in r:
@@ -615,24 +1003,34 @@ LIMIT {limit}"""
         return res
 
     def delete_many(
-        self,
-        keys: List[dict],
-        filters: "List[dict[str, Any]]",
-        chunk_size: int = 10_000
+        self, keys: List[str], filters: "List[dict[str, Any]]", chunk_size: int = 10_000
     ):
+        """
+        Delete rows by filter in DB
+        ### Examples:
+        >>> db = dataset.connect("postgres://localhost/test")
+        >>> db['table'].delete_many(['id'], [{'id': 1}, {'id': 2}])
+        """
         return run_async(self.delete_many_async(keys, filters, chunk_size))
 
+    @progress_decorator("delete_many")
     async def delete_many_async(
         self,
-        keys: List[dict],
+        keys: List[str],
         filters: "dict[str, Any]",
-        chunk_size: int = 10_000
+        chunk_size: int = 10_000,
+        bot: Optional[BotProgressReport] = None,
     ) -> dict:
+        """Deleete many on DB"""
+        assert bot is not None
+        self._bot_init(bot)
 
         self.fields = await self._get_fields()
         keys = await self._check_keys(keys)
         # data, unused_fields = await self._prepare_data(filters)
-        data, fields = await self._prepare_data_fields(filters, keys, remove_non_keys=True)
+        data, fields = await self._prepare_data_fields(
+            filters, keys, remove_non_keys=True
+        )
         fields_filters = {k: v for k, v in self.fields.items() if k in keys}
 
         expr_where = [await self._field_set(k, fields_filters) for k in keys]
@@ -646,6 +1044,7 @@ WHERE
 
         self.log.debug(f"Query: {q}")
         res = []
+        bot.set_total(total=len(data))
         if self.progressbar:
             tbar = tqdm(desc="Delete", total=len(data))
 
@@ -653,6 +1052,7 @@ WHERE
             for chunk in chunks(data, chunk_size):
                 await self.conn.executemany(q, chunk)
 
+                await bot.update(len(chunk))
                 if self.progressbar:
                     tbar.update(len(chunk))
 

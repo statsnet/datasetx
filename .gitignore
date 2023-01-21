@@ -18,6 +18,7 @@ media
 migrations
 migrations/*
 *.env
+*.ipynb
 
 .DS_Store
 .thumbs.db
