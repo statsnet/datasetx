@@ -377,13 +377,16 @@ class Dataset:
             self.title = title
 
     def set_title(self, title: str):
+        """Set bot notification title"""
         self.title = title
+
+    set_desc = set_title
 
     def _bot_init(self, bot: BotProgressReport):
         bot.enable = self.bot_enable
         if bot.title:
             if self.title:
-                bot.title += f" - {self.title}"
+                bot.title += f" - {self.db} ({self.title})"
             else:
                 bot.title += f" - {self.db}"
 
@@ -640,6 +643,7 @@ ORDER BY ordinal_position
         update_keys: List[str] = None,
         id_columns: List[str] = None,
         chunk_size: int = 50_000,
+        desc: Optional[str] = None,
     ):
         """
         Upsert many records in DB. If record not exists, it will be inserted otherwise updated. Required index with UNIQUE for all keys fields altogether
@@ -648,6 +652,8 @@ ORDER BY ordinal_position
         >>> db = dataset.connect("postgres://localhost/test")
         >>> db['table'].upsert_many(rows, ['id', 'is_active'])
         """
+        if desc:
+            self.set_desc(desc)
         return run_async(
             self.upsert_many_async(
                 rows,
@@ -681,8 +687,11 @@ ORDER BY ordinal_position
         values: "dict[str, Any]",
         chunk_size: int = 50_000,
         bot: Optional[BotProgressReport] = None,
+        desc: Optional[str] = None,
     ):
         """Run update_many on DB. Only updates already existing records."""
+        if desc:
+            self.set_desc(desc)
         assert bot is not None
         self._bot_init(bot)
 
@@ -734,7 +743,7 @@ WHERE
         if self.progressbar:
             tbar.close()
 
-    def update_many(self, rows: List[Any], keys: List[str], chunk_size: int = 50_000):
+    def update_many(self, rows: List[Any], keys: List[str], chunk_size: int = 50_000,desc: Optional[str] = None):
         """Run update_many on DB. Only updates already existing records."""
         """
         Update many records in DB by keys values.
@@ -743,6 +752,8 @@ WHERE
         >>> db = dataset.connect("postgres://localhost/test")
         >>> db['table'].update_many(rows, ['id'])
         """
+        if desc:
+            self.set_desc(desc)
         return run_async(self.update_many_async(rows, keys, chunk_size))
 
     @progress_decorator("update_many")
@@ -874,7 +885,8 @@ ON CONFLICT DO NOTHING
         #     )
 
     def insert_many(
-        self, rows: List[dict], keys: List[str], id_column: Optional[str] = None
+        self, rows: List[dict], keys: List[str], id_column: Optional[str] = None,
+        desc: Optional[str] = None,
     ) -> List[int]:
         """
         Insert many records in DB. Slower than upsert_many, but returns id_column value.
@@ -883,6 +895,8 @@ ON CONFLICT DO NOTHING
         >>> db = dataset.connect("postgres://localhost/test")
         >>> db['table'].insert_many(rows, ['id', 'is_active'])
         """
+        if desc:
+            self.set_desc(desc)
         return run_async(self.insert_many_async(rows, keys, id_column=id_column))
 
     @progress_decorator("insert_many")
@@ -949,12 +963,28 @@ VALUES ({values_str})
         """
         return run_async(self.select_async(keys, filters, filters_many, limit))
 
+    def select_where(
+        self,
+        keys: List[str],
+        where: str,
+        limit: Optional[int] = None,
+    ) -> List[dict]:
+        """
+        Select data from DB
+        ### Examples:
+        >>> db = dataset.connect("postgres://localhost/test")
+        >>> db['table'].select(['id'], {'is_active': True})
+        >>> db['table'].select(['id', 'is_active'], {'is_active': True})
+        """
+        return run_async(self.select_async(keys, {}, where=where, limit=limit))
+
     async def select_async(
         self,
         keys: List[str],
         filters: "dict[str, Any]",
-        filters_many: List = None,
-        limit: int = None,
+        filters_many: Optional[List] = None,
+        where: Optional[str] = None,
+        limit: Optional[int] = None,
     ) -> List[dict]:
 
         self.fields = await self._get_fields()
@@ -967,12 +997,12 @@ VALUES ({values_str})
             for k in self.fields.keys()
             if k in filters
         ]
-        expr_where_str = "\n    AND ".join(expr_where)
+        expr_where_str = where if where else "\n    AND ".join(expr_where)
 
         q = f"""
 SELECT ({fields_str}) FROM {self.db} """
 
-        if filters:
+        if filters or where:
             q += f"""
 WHERE
     {expr_where_str}"""
@@ -1004,7 +1034,7 @@ LIMIT {limit}"""
         return res
 
     def delete_many(
-        self, keys: List[str], filters: "List[dict[str, Any]]", chunk_size: int = 10_000
+        self, keys: List[str], filters: "List[dict[str, Any]]", chunk_size: int = 10_000, desc: Optional[str] = None
     ):
         """
         Delete rows by filter in DB
@@ -1012,17 +1042,19 @@ LIMIT {limit}"""
         >>> db = dataset.connect("postgres://localhost/test")
         >>> db['table'].delete_many(['id'], [{'id': 1}, {'id': 2}])
         """
+        if desc:
+            self.set_desc(desc)
         return run_async(self.delete_many_async(keys, filters, chunk_size))
 
     @progress_decorator("delete_many")
     async def delete_many_async(
         self,
-        keys: List[str],
-        filters: "dict[str, Any]",
+        keys: List[List[str]],
+        filters: "List[dict[str, Any]]",
         chunk_size: int = 10_000,
         bot: Optional[BotProgressReport] = None,
     ) -> dict:
-        """Deleete many on DB"""
+        """Delete many on DB"""
         assert bot is not None
         self._bot_init(bot)
 
