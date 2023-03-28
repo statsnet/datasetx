@@ -34,6 +34,7 @@ from dotenv import load_dotenv
 from pytz import UnknownTimeZoneError, timezone
 from tqdm import tqdm
 from tqdm.asyncio import tqdm_asyncio
+from asyncpg import Record
 
 warnings.simplefilter("ignore", DeprecationWarning)
 
@@ -1093,3 +1094,44 @@ WHERE
             tbar.close()
 
         return res
+
+    def _records_to_dict(self, records:list[Record]):
+        return [
+            dict(rec) for rec in records
+        ]
+
+    def query(self, sql: str, values:list[Any]=[], asdict:bool=True):
+        """
+        Perform raw SQL query
+        ### Examples:
+        >>> db = dataset.connect("postgres://localhost/test")
+        >>> db['table'].query("SELECT * FROM table")
+        """
+        return run_async(self.query_async(sql, values, asdict))
+
+    async def query_async(self, sql: str, values:list[Any]=[], asdict:bool=True):
+        assert self.conn is not None
+        r = await self.conn.fetch(sql, *values)
+
+        if asdict:
+            # if isinstance(r, Record):
+            try:
+                return self._records_to_dict(r)
+            except Exception as e:
+                self.log.error(f"Error processing records_to_dict", exc_info=e)
+                pass
+        return r
+
+    def execute(self, sql: str, values:list[Any]=[]):
+        """
+        Perform raw SQL execute
+        ### Examples:
+        >>> db = dataset.connect("postgres://localhost/test")
+        >>> db['table'].execute("INSERT (1,2) INTO table")
+        """
+        return run_async(self.execute_async(sql, values))
+
+    async def execute_async(self, sql: str, values:list[Any]=[]):
+        assert self.conn is not None
+        r = await self.conn.execute(sql, *values)
+        return r
