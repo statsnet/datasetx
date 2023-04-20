@@ -16,33 +16,31 @@ table.upsert_many(rows, ["key1", "key2"])
 """
 
 import asyncio
+import functools
 import json
 import logging
+import os
 import re
+import warnings
 from collections import OrderedDict
 from copy import copy
 from datetime import datetime, timedelta
-from typing import Any, Callable, Coroutine, Iterable, List, Tuple
-import asyncio
-from datetime import datetime
-import functools
-import logging
-import os
-from typing import Optional
-import warnings
-from dotenv import load_dotenv
-from aiogram.bot import Bot
-from tqdm.asyncio import tqdm_asyncio
-from pytz import UnknownTimeZoneError, timezone
+from typing import Any, Coroutine, Iterable, List, Optional, Tuple
+
 import asyncpg
+from aiogram.bot import Bot
 from asyncpg.connection import Connection
+from dotenv import load_dotenv
+from pytz import UnknownTimeZoneError, timezone
 from tqdm import tqdm
+from tqdm.asyncio import tqdm_asyncio
+from asyncpg import Record
 
 warnings.simplefilter("ignore", DeprecationWarning)
 
 logging.basicConfig()
 
-dotenv_path = join(dirname(__file__), '.env')
+dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path)
 
 
@@ -90,6 +88,7 @@ class BotProgressReport:
     total: Optional[int] = 0
     completed: int = 0
     bar_width: Optional[int] = int(os.getenv("BAR_WIDTH", 80))
+    min_percent: Optional[int] = int(os.getenv("MINPERCENT", 1))
     state_icons = {
         False: "🔴",
         True: "🟢",
@@ -136,7 +135,7 @@ class BotProgressReport:
             }
         )
         if not "mininterval" in params:
-            params["mininterval"] = 2
+            params["mininterval"] = int(os.getenv("MININTERVAL", 2))
         self.pbar = tqdm_asyncio(**params)
         if total:
             self.set_total(total)
@@ -181,16 +180,20 @@ class BotProgressReport:
         r = []
         for i in str(td).split(":"):
             r.append(str(int(float(i))).zfill(2))
-        return ':'.join(r)
+        return ":".join(r)
 
     def _template(self, after: str = "", before: str = ""):
         """Message template"""
         if self.finished_at and self.started_at:
-            last_run_text = f"*Время завершения*: `{self._format_date(self.finished_at)}`"
+            last_run_text = (
+                f"*Время завершения*: `{self._format_date(self.finished_at)}`"
+            )
             timedelta_str = self._timedelta_str(self.finished_at - self.started_at)
             last_run_text += f"\n*Прошло времени*: `{timedelta_str}`"
         else:
-            last_run_text = f"*Последнее обновление*: `{self._format_date(self._now())}`"
+            last_run_text = (
+                f"*Последнее обновление*: `{self._format_date(self._now())}`"
+            )
 
         return f"""
 {before}
@@ -212,7 +215,7 @@ class BotProgressReport:
         """Set total items count for progress bar"""
         self.total = total
         self.pbar.total = total
-        self.pbar.miniters = int(total / 100)
+        self.pbar.miniters = int(total / 100 * (self.min_percent or 1))
 
     async def start(self):
         """Start progress sending"""
@@ -262,9 +265,9 @@ class BotProgressReport:
         """Update progress status"""
         if self._is_enabled:
             self.completed += count
-            self.log.debug(
-                f"Updated progress by {count}, now: {self.completed} / {self.total}"
-            )
+            # self.log.debug(
+            #     f"Updated progress by {count}, now: {self.completed} / {self.total}"
+            # )
             self.pbar.update(count)
 
     async def _tqdm_callback(self, bar_text: Optional[str] = None):
@@ -364,7 +367,7 @@ class Dataset:
     progressbar = True  # Show tqdm progressbar
     dryrun = False  # Run in dry mode, just print query
     title: Optional[str] = None  # Task title in telegram bot
-    bot_enable: bool = True # Enable bot notifications
+    bot_enable: bool = True  # Enable bot notifications
 
     def __init__(
         self, log_level: Optional[str] = None, title: Optional[str] = None
@@ -374,13 +377,19 @@ class Dataset:
         if title:
             self.title = title
 
-    def set_title(self, title:str):
+    def set_title(self, title: str):
+        """Set bot notification title"""
         self.title = title
+
+    set_desc = set_title
 
     def _bot_init(self, bot: BotProgressReport):
         bot.enable = self.bot_enable
-        if bot.title and self.title:
-            bot.title += f" - {self.title}"
+        if bot.title:
+            if self.title:
+                bot.title += f" - {self.db} ({self.title})"
+            else:
+                bot.title += f" - {self.db}"
 
     def __getitem__(self, __name: str) -> "Dataset":
         """Get DB table"""
@@ -635,6 +644,7 @@ ORDER BY ordinal_position
         update_keys: List[str] = None,
         id_columns: List[str] = None,
         chunk_size: int = 50_000,
+        desc: Optional[str] = None,
     ):
         """
         Upsert many records in DB. If record not exists, it will be inserted otherwise updated. Required index with UNIQUE for all keys fields altogether
@@ -643,6 +653,8 @@ ORDER BY ordinal_position
         >>> db = dataset.connect("postgres://localhost/test")
         >>> db['table'].upsert_many(rows, ['id', 'is_active'])
         """
+        if desc:
+            self.set_desc(desc)
         return run_async(
             self.upsert_many_async(
                 rows,
@@ -676,8 +688,11 @@ ORDER BY ordinal_position
         values: "dict[str, Any]",
         chunk_size: int = 50_000,
         bot: Optional[BotProgressReport] = None,
+        desc: Optional[str] = None,
     ):
         """Run update_many on DB. Only updates already existing records."""
+        if desc:
+            self.set_desc(desc)
         assert bot is not None
         self._bot_init(bot)
 
@@ -729,7 +744,13 @@ WHERE
         if self.progressbar:
             tbar.close()
 
-    def update_many(self, rows: List[Any], keys: List[str], chunk_size: int = 50_000):
+    def update_many(
+        self,
+        rows: List[Any],
+        keys: List[str],
+        chunk_size: int = 50_000,
+        desc: Optional[str] = None,
+    ):
         """Run update_many on DB. Only updates already existing records."""
         """
         Update many records in DB by keys values.
@@ -738,6 +759,8 @@ WHERE
         >>> db = dataset.connect("postgres://localhost/test")
         >>> db['table'].update_many(rows, ['id'])
         """
+        if desc:
+            self.set_desc(desc)
         return run_async(self.update_many_async(rows, keys, chunk_size))
 
     @progress_decorator("update_many")
@@ -869,7 +892,11 @@ ON CONFLICT DO NOTHING
         #     )
 
     def insert_many(
-        self, rows: List[dict], keys: List[str], id_column: Optional[str] = None
+        self,
+        rows: List[dict],
+        keys: List[str],
+        id_column: Optional[str] = None,
+        desc: Optional[str] = None,
     ) -> List[int]:
         """
         Insert many records in DB. Slower than upsert_many, but returns id_column value.
@@ -878,6 +905,8 @@ ON CONFLICT DO NOTHING
         >>> db = dataset.connect("postgres://localhost/test")
         >>> db['table'].insert_many(rows, ['id', 'is_active'])
         """
+        if desc:
+            self.set_desc(desc)
         return run_async(self.insert_many_async(rows, keys, id_column=id_column))
 
     @progress_decorator("insert_many")
@@ -944,12 +973,28 @@ VALUES ({values_str})
         """
         return run_async(self.select_async(keys, filters, filters_many, limit))
 
+    def select_where(
+        self,
+        keys: List[str],
+        where: str,
+        limit: Optional[int] = None,
+    ) -> List[dict]:
+        """
+        Select data from DB
+        ### Examples:
+        >>> db = dataset.connect("postgres://localhost/test")
+        >>> db['table'].select(['id'], {'is_active': True})
+        >>> db['table'].select(['id', 'is_active'], {'is_active': True})
+        """
+        return run_async(self.select_async(keys, {}, where=where, limit=limit))
+
     async def select_async(
         self,
         keys: List[str],
         filters: "dict[str, Any]",
-        filters_many: List = None,
-        limit: int = None,
+        filters_many: Optional[List] = None,
+        where: Optional[str] = None,
+        limit: Optional[int] = None,
     ) -> List[dict]:
 
         self.fields = await self._get_fields()
@@ -962,12 +1007,12 @@ VALUES ({values_str})
             for k in self.fields.keys()
             if k in filters
         ]
-        expr_where_str = "\n    AND ".join(expr_where)
+        expr_where_str = where if where else "\n    AND ".join(expr_where)
 
         q = f"""
 SELECT ({fields_str}) FROM {self.db} """
 
-        if filters:
+        if filters or where:
             q += f"""
 WHERE
     {expr_where_str}"""
@@ -999,7 +1044,11 @@ LIMIT {limit}"""
         return res
 
     def delete_many(
-        self, keys: List[str], filters: "List[dict[str, Any]]", chunk_size: int = 10_000
+        self,
+        keys: List[str],
+        filters: "List[dict[str, Any]]",
+        chunk_size: int = 10_000,
+        desc: Optional[str] = None,
     ):
         """
         Delete rows by filter in DB
@@ -1007,17 +1056,19 @@ LIMIT {limit}"""
         >>> db = dataset.connect("postgres://localhost/test")
         >>> db['table'].delete_many(['id'], [{'id': 1}, {'id': 2}])
         """
+        if desc:
+            self.set_desc(desc)
         return run_async(self.delete_many_async(keys, filters, chunk_size))
 
     @progress_decorator("delete_many")
     async def delete_many_async(
         self,
-        keys: List[str],
-        filters: "dict[str, Any]",
+        keys: List[List[str]],
+        filters: "List[dict[str, Any]]",
         chunk_size: int = 10_000,
         bot: Optional[BotProgressReport] = None,
     ) -> dict:
-        """Deleete many on DB"""
+        """Delete many on DB"""
         assert bot is not None
         self._bot_init(bot)
 
@@ -1056,3 +1107,42 @@ WHERE
             tbar.close()
 
         return res
+
+    def _records_to_dict(self, records: list[Record]):
+        return [dict(rec) for rec in records]
+
+    def query(self, sql: str, values: list[Any] = [], asdict: bool = True):
+        """
+        Perform raw SQL query
+        ### Examples:
+        >>> db = dataset.connect("postgres://localhost/test")
+        >>> db['table'].query("SELECT * FROM table")
+        """
+        return run_async(self.query_async(sql, values, asdict))
+
+    async def query_async(self, sql: str, values: list[Any] = [], asdict: bool = True):
+        assert self.conn is not None
+        r = await self.conn.fetch(sql, *values)
+
+        if asdict:
+            # if isinstance(r, Record):
+            try:
+                return self._records_to_dict(r)
+            except Exception as e:
+                self.log.error(f"Error processing records_to_dict", exc_info=e)
+                pass
+        return r
+
+    def execute(self, sql: str, values: list[Any] = []):
+        """
+        Perform raw SQL execute
+        ### Examples:
+        >>> db = dataset.connect("postgres://localhost/test")
+        >>> db['table'].execute("INSERT (1,2) INTO table")
+        """
+        return run_async(self.execute_async(sql, values))
+
+    async def execute_async(self, sql: str, values: list[Any] = []):
+        assert self.conn is not None
+        r = await self.conn.execute(sql, *values)
+        return r
