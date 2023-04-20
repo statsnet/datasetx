@@ -25,7 +25,7 @@ import warnings
 from collections import OrderedDict
 from copy import copy
 from datetime import datetime, timedelta
-from typing import Any, Callable, Coroutine, Iterable, List, Optional, Tuple
+from typing import Any, Coroutine, Iterable, List, Optional, Tuple
 
 import asyncpg
 from aiogram.bot import Bot
@@ -744,7 +744,13 @@ WHERE
         if self.progressbar:
             tbar.close()
 
-    def update_many(self, rows: List[Any], keys: List[str], chunk_size: int = 50_000,desc: Optional[str] = None):
+    def update_many(
+        self,
+        rows: List[Any],
+        keys: List[str],
+        chunk_size: int = 50_000,
+        desc: Optional[str] = None,
+    ):
         """Run update_many on DB. Only updates already existing records."""
         """
         Update many records in DB by keys values.
@@ -886,7 +892,10 @@ ON CONFLICT DO NOTHING
         #     )
 
     def insert_many(
-        self, rows: List[dict], keys: List[str], id_column: Optional[str] = None,
+        self,
+        rows: List[dict],
+        keys: List[str],
+        id_column: Optional[str] = None,
         desc: Optional[str] = None,
     ) -> List[int]:
         """
@@ -1035,7 +1044,11 @@ LIMIT {limit}"""
         return res
 
     def delete_many(
-        self, keys: List[str], filters: "List[dict[str, Any]]", chunk_size: int = 10_000, desc: Optional[str] = None
+        self,
+        keys: List[str],
+        filters: "List[dict[str, Any]]",
+        chunk_size: int = 10_000,
+        desc: Optional[str] = None,
     ):
         """
         Delete rows by filter in DB
@@ -1095,12 +1108,10 @@ WHERE
 
         return res
 
-    def _records_to_dict(self, records:list[Record]):
-        return [
-            dict(rec) for rec in records
-        ]
+    def _records_to_dict(self, records: list[Record]):
+        return [dict(rec) for rec in records]
 
-    def query(self, sql: str, values:list[Any]=[], asdict:bool=True):
+    def query(self, sql: str, values: list[Any] = [], asdict: bool = True):
         """
         Perform raw SQL query
         ### Examples:
@@ -1109,7 +1120,7 @@ WHERE
         """
         return run_async(self.query_async(sql, values, asdict))
 
-    async def query_async(self, sql: str, values:list[Any]=[], asdict:bool=True):
+    async def query_async(self, sql: str, values: list[Any] = [], asdict: bool = True):
         assert self.conn is not None
         r = await self.conn.fetch(sql, *values)
 
@@ -1122,7 +1133,7 @@ WHERE
                 pass
         return r
 
-    def execute(self, sql: str, values:list[Any]=[]):
+    def execute(self, sql: str, values: list[Any] = []):
         """
         Perform raw SQL execute
         ### Examples:
@@ -1131,7 +1142,7 @@ WHERE
         """
         return run_async(self.execute_async(sql, values))
 
-    async def execute_async(self, sql: str, values:list[Any]=[]):
+    async def execute_async(self, sql: str, values: list[Any] = []):
         assert self.conn is not None
         r = await self.conn.execute(sql, *values)
         return r
