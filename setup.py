@@ -1,8 +1,8 @@
 from setuptools import setup
 
 setup(
-    name="dataset",
-    py_modules=["dataset"],
+    name="datasetx",
+    py_modules=["datasetx"],
     description="PostgreSQL dataset export",
     version=0.1,
     author="Djangoner",
