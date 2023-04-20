@@ -8,4 +8,10 @@ setup(
     author="Djangoner",
     author_email="djangoner6@gmail.com",
     keywords=["postgres", "postgreSQL", "DB", "database", "dataset"],
+    install_requires=[
+        "asyncpg",
+        "tqdm",
+        "python-dotenv",
+        "aiogram"
+    ]
 )
