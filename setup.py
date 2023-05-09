@@ -12,6 +12,8 @@ setup(
         "asyncpg",
         "tqdm",
         "python-dotenv",
+        "boto3",
+        "sshtunnel",
         "aiogram"
     ]
 )

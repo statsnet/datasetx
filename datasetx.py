@@ -35,6 +35,9 @@ from pytz import UnknownTimeZoneError, timezone
 from tqdm import tqdm
 from tqdm.asyncio import tqdm_asyncio
 from asyncpg import Record
+from sshtunnel import SSHTunnelForwarder
+import boto3
+from urllib.parse import urlparse
 
 warnings.simplefilter("ignore", DeprecationWarning)
 
@@ -413,11 +416,68 @@ class Dataset:
         """Run disconnect_async in run_async"""
         return run_async(self.disconnect_async(*args, **kwargs))
 
-    async def connect_async(self, url: str) -> Connection:
+    async def connect_async(
+        self,
+        url: str,
+        ssh_address: Optional[Tuple[str, int] | str] = None,
+        ssh_username: Optional[str] = None,
+        aws_region: str = "eu-north-1",
+        aws_profile: Optional[str] = None,
+        aws_secret_key: Optional[str] = None,
+        aws_secret_id: Optional[str] = None,
+        ssh_key: Optional[str] = None,
+        bind_port: Optional[int] = None,
+    ) -> Connection:
         """Connect to PostreSQL DB"""
-        self.log.debug("Connecting to DB...")
-        self.conn = await asyncpg.connect(url)
-        return self.conn
+
+        if ssh_address:  # SSH tunnel
+            if not all([ssh_address, ssh_username, ssh_key]):
+                raise RuntimeError(
+                    "ssh_address, ssh_username and ssh_key are required for SSH tunnel!"
+                )
+            self.log.debug("Connecting to SSH Tunnel...")
+            parsed = urlparse(url)
+            default_port = 5432
+
+            session = boto3.Session(
+                profile_name=aws_profile,
+                aws_secret_access_key=aws_secret_key,
+                aws_access_key_id=aws_secret_id,
+                region_name=aws_region,
+            )
+            client = session.client("rds")
+            token = client.generate_db_auth_token(
+                DBHostname=parsed.hostname,
+                Port=parsed.port or default_port,
+                DBUsername=parsed.username,
+                Region=aws_region,
+            )
+
+            server = SSHTunnelForwarder(
+                ssh_address_or_host=ssh_address,
+                ssh_username=ssh_username,
+                ssh_private_key=ssh_key,  # Can be file name or key string
+                remote_bind_address=(parsed.hostname, parsed.port or default_port),
+                local_bind_address=("0.0.0.0", bind_port or 8621),
+            )
+            server.start()
+
+            ## SSH Tunnel DB connection
+            db_username = parsed.netloc.split("@")[0].split(":")[0]
+
+            self.log.debug(f"Connecting to DB...")
+            self.conn = await asyncpg.connect(
+                user=db_username,
+                password=token,
+                host="localhost",
+                port=server.local_bind_port,
+                database=parsed.path[1:]
+            )
+            return self.conn
+        else:
+            self.log.debug("Connecting to DB...")
+            self.conn = await asyncpg.connect(url)
+            return self.conn
 
     async def disconnect_async(self):
         self.log.debug("Disconnecting from DB")
