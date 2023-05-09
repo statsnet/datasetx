@@ -22,11 +22,12 @@ import json
 import logging
 import os
 import re
+from types import NoneType
 import warnings
 from collections import OrderedDict
 from copy import copy
 from datetime import datetime, timedelta
-from typing import Any, Coroutine, Iterable, List, Optional, Tuple, Union
+from typing import Any, Callable, Coroutine, Iterable, List, Optional, Tuple, Type, Union, cast
 
 import asyncpg
 from aiogram.bot import Bot
@@ -40,6 +41,7 @@ from asyncpg import Record
 from sshtunnel import SSHTunnelForwarder
 import boto3
 from urllib.parse import urlparse
+from typing import Callable, TypeVar, ParamSpec
 
 warnings.simplefilter("ignore", DeprecationWarning)
 
@@ -48,6 +50,18 @@ logging.basicConfig()
 dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path)
 
+
+P = ParamSpec("P")
+T = TypeVar("T")
+
+
+def copy_doc(wrapper: Callable[P, T]):
+    """Copy function docstring"""
+    def decorator(func: Callable) -> Callable[P, T]:
+        func.__doc__ = wrapper.__doc__
+        return func
+
+    return decorator
 
 class DatasetException(ValueError):
     pass
@@ -342,14 +356,6 @@ def progress_decorator(title: str):
     return wrapper
 
 
-def connect(url: str, *args, log_level: Optional[str] = None, **kwargs):
-    """Connect to PostgreSQL DB"""
-
-    ds = Dataset(log_level=log_level)
-    ds.connect(url, *args, **kwargs)
-    return ds
-
-
 def run_async(func: Coroutine):
     """Run async command as sync"""
     loop = asyncio.get_event_loop()
@@ -409,29 +415,32 @@ class Dataset:
         cls.db = name
         return cls
 
-    def connect(self, url: str, *args, **kwargs):
-        """Run connect_async in run_async"""
-        self.conn_url = url
-        return run_async(self.connect_async(url, *args, **kwargs))
-
-    def disconnect(self, *args, **kwargs):
-        """Run disconnect_async in run_async"""
-        return run_async(self.disconnect_async(*args, **kwargs))
 
     async def connect_async(
         self,
         url: str,
         ssh_address: Optional[Union[Tuple[str, int], str]] = None,
         ssh_username: Optional[str] = None,
+        ssh_key: Optional[str] = None,
         aws_region: str = "eu-north-1",
         aws_profile: Optional[str] = None,
         aws_secret_key: Optional[str] = None,
         aws_secret_id: Optional[str] = None,
-        ssh_key: Optional[str] = None,
         bind_port: Optional[int] = None,
     ) -> Connection:
-        """Connect to PostreSQL DB"""
+        """
+        Connect to PostgreSQL DB
 
+        :param str url: URL for connecting to postgresql in format: postgres://user:pass@host:port/database
+        :param str ssh_address: address to connect to Amazon RDS SSH forwarding server. If set, ssh tunnel will be used.
+        :param str ssh_username: username to connect to Amazon RDS
+        :param str ssh_key: path to the private SSH key or SSH key contents
+        :param str aws_region: AWS region
+        :params str aws_profile: can be used as replace for aws* settings. [boto3 docs](https://boto3.amazonaws.com/v1/documentation/api/latest/guide/credentials.html#configuring-credentials)
+        :param str aws_secret_key: secret key to connect to Amazon RDS
+        :param str aws_secret_id: secret key to connect to Amazon RDS (shorter than aws_secret_key)
+        :param str bind_port: local port used for SSH tunneling. Should be different if multiple instances should be run.
+        """
         if ssh_address:  # SSH tunnel
             if not all([ssh_address, ssh_username, ssh_key]):
                 raise RuntimeError(
@@ -476,7 +485,7 @@ class Dataset:
                 password=token,
                 host="localhost",
                 port=server.local_bind_port,
-                database=parsed.path[1:]
+                database=parsed.path[1:],
             )
             return self.conn
         else:
@@ -484,13 +493,27 @@ class Dataset:
             self.conn = await asyncpg.connect(url)
             return self.conn
 
+
+
+    @copy_doc(connect_async)
+    def connect(self, url: str, *args, **kwargs):
+        self.conn_url = url
+        return run_async(self.connect_async(url, *args, **kwargs))
+
     async def disconnect_async(self):
+        """Disconnect from DB. Recommended, but not required"""
         self.log.debug("Disconnecting from DB")
         if self.conn:
             return await self.conn.close()
 
+
+    @copy_doc(disconnect_async)
+    def disconnect(self, *args, **kwargs):
+        return run_async(self.disconnect_async(*args, **kwargs))
+
+
     def _check_table(self):
-        """Check is table selected"""
+        """Check is table selected for operation"""
         if not self.db:
             raise DBEmptyException("Call dataset.connection()['table_name'] ")
 
@@ -511,7 +534,7 @@ class Dataset:
         return keys
 
     async def _get_fields(self) -> "OrderedDict[str, str]":
-        """Get dict of DB fields {name: field_type}"""
+        """Get dict of DB fields. Output format: {name: field_type}"""
         self._check_table()
         q = f"""
 SELECT column_name, data_type FROM information_schema.columns
@@ -544,10 +567,6 @@ ORDER BY ordinal_position
             except ValueError:
                 pass
         raise ValueError(f"Invalid date format: '{val}'")
-
-    # async def _iter_array_type(self, val: Iterable, field_type: str):
-    #     for item in val:
-    #         yield self._convert_value(item, field_type)
 
     async def _convert_value(self, val: Any, field_type: str, field_name: str) -> Any:
         """Convert passed value to DB field type"""
@@ -599,7 +618,7 @@ ORDER BY ordinal_position
         return val
 
     async def _prepare_data(self, rows: List[dict]) -> Tuple[List[Any], List[str]]:
-        """Prepare data for DB (convert rows dict to list)"""
+        """Prepare data for DB (convert rows dict to DB argument list)"""
         res = []
         unused_fields = list(self.fields.keys())
 
@@ -746,6 +765,7 @@ ORDER BY ordinal_position
         """
         return run_async(self.update_many_filter_async(filters, values, chunk_size))
 
+    @copy_doc(update_many_filter)
     @progress_decorator("update_many_filter")
     async def update_many_filter_async(
         self,
@@ -828,6 +848,7 @@ WHERE
             self.set_desc(desc)
         return run_async(self.update_many_async(rows, keys, chunk_size))
 
+    @copy_doc(update_many)
     @progress_decorator("update_many")
     async def update_many_async(
         self,
@@ -1053,6 +1074,7 @@ VALUES ({values_str})
         """
         return run_async(self.select_async(keys, {}, where=where, limit=limit))
 
+    @copy_doc(select)
     async def select_async(
         self,
         keys: List[str],
@@ -1125,6 +1147,7 @@ LIMIT {limit}"""
             self.set_desc(desc)
         return run_async(self.delete_many_async(keys, filters, chunk_size))
 
+    @copy_doc(delete_many)
     @progress_decorator("delete_many")
     async def delete_many_async(
         self,
@@ -1185,6 +1208,7 @@ WHERE
         """
         return run_async(self.query_async(sql, values, asdict))
 
+    @copy_doc(query)
     async def query_async(self, sql: str, values: list[Any] = [], asdict: bool = True):
         assert self.conn is not None
         r = await self.conn.fetch(sql, *values)
@@ -1207,7 +1231,16 @@ WHERE
         """
         return run_async(self.execute_async(sql, values))
 
+    @copy_doc(execute)
     async def execute_async(self, sql: str, values: list[Any] = []):
         assert self.conn is not None
         r = await self.conn.execute(sql, *values)
         return r
+
+
+# @copy_doc(Dataset.connect_async)
+# @copy_kwargs(Dataset.connect_async, Dataset)
+def connect(url: str, *args, log_level: Optional[str] = None, **kwargs):
+    ds = Dataset(log_level=log_level)
+    ds.connect(url, *args, **kwargs)
+    return ds

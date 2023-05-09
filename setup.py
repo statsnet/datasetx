@@ -14,6 +14,6 @@ setup(
         "python-dotenv",
         "boto3",
         "sshtunnel",
-        "aiogram"
-    ]
+        "aiogram",
+    ],
 )
