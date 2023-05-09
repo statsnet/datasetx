@@ -25,7 +25,7 @@ import warnings
 from collections import OrderedDict
 from copy import copy
 from datetime import datetime, timedelta
-from typing import Any, Coroutine, Iterable, List, Optional, Tuple
+from typing import Any, Coroutine, Iterable, List, Optional, Tuple, Union
 
 import asyncpg
 from aiogram.bot import Bot
@@ -419,7 +419,7 @@ class Dataset:
     async def connect_async(
         self,
         url: str,
-        ssh_address: Optional[Tuple[str, int] | str] = None,
+        ssh_address: Optional[Union[Tuple[str, int], str]] = None,
         ssh_username: Optional[str] = None,
         aws_region: str = "eu-north-1",
         aws_profile: Optional[str] = None,
