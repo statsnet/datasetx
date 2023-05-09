@@ -17,6 +17,7 @@ table.upsert_many(rows, ["key1", "key2"])
 
 import asyncio
 import functools
+import io
 import json
 import logging
 import os
@@ -31,6 +32,7 @@ import asyncpg
 from aiogram.bot import Bot
 from asyncpg.connection import Connection
 from dotenv import load_dotenv
+import paramiko
 from pytz import UnknownTimeZoneError, timezone
 from tqdm import tqdm
 from tqdm.asyncio import tqdm_asyncio
@@ -439,6 +441,9 @@ class Dataset:
             parsed = urlparse(url)
             default_port = 5432
 
+            if not os.path.exists(ssh_key):
+                ssh_key = paramiko.RSAKey.from_private_key(io.StringIO(ssh_key))
+
             session = boto3.Session(
                 profile_name=aws_profile,
                 aws_secret_access_key=aws_secret_key,
@@ -456,7 +461,7 @@ class Dataset:
             server = SSHTunnelForwarder(
                 ssh_address_or_host=ssh_address,
                 ssh_username=ssh_username,
-                ssh_private_key=ssh_key,  # Can be file name or key string
+                ssh_pkey=ssh_key,  # Can be file name or key string
                 remote_bind_address=(parsed.hostname, parsed.port or default_port),
                 local_bind_address=("0.0.0.0", bind_port or 8621),
             )
