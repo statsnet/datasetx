@@ -22,12 +22,19 @@ import json
 import logging
 import os
 import re
-from types import NoneType
 import warnings
 from collections import OrderedDict
 from copy import copy
 from datetime import datetime, timedelta
-from typing import Any, Callable, Coroutine, Iterable, List, Optional, Tuple, Type, Union, cast
+from typing import (
+    Any,
+    Coroutine,
+    Iterable,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
 
 import asyncpg
 from aiogram.bot import Bot
@@ -57,11 +64,13 @@ T = TypeVar("T")
 
 def copy_doc(wrapper: Callable[P, T]):
     """Copy function docstring"""
+
     def decorator(func: Callable) -> Callable[P, T]:
         func.__doc__ = wrapper.__doc__
         return func
 
     return decorator
+
 
 class DatasetException(ValueError):
     pass
@@ -153,7 +162,7 @@ class BotProgressReport:
                 "unit_scale": True,
             }
         )
-        if not "mininterval" in params:
+        if "mininterval" not in params:
             params["mininterval"] = int(os.getenv("MININTERVAL", 2))
         self.pbar = tqdm_asyncio(**params)
         if total:
@@ -415,7 +424,6 @@ class Dataset:
         cls.db = name
         return cls
 
-
     async def connect_async(
         self,
         url: str,
@@ -436,7 +444,8 @@ class Dataset:
         :param str ssh_username: username to connect to Amazon RDS
         :param str ssh_key: path to the private SSH key or SSH key contents
         :param str aws_region: AWS region
-        :params str aws_profile: can be used as replace for aws* settings. [boto3 docs](https://boto3.amazonaws.com/v1/documentation/api/latest/guide/credentials.html#configuring-credentials)
+        :params str aws_profile: can be used as replace for aws* settings.
+        [boto3 docs](https://boto3.amazonaws.com/v1/documentation/api/latest/guide/credentials.html#configuring-credentials)
         :param str aws_secret_key: secret key to connect to Amazon RDS
         :param str aws_secret_id: secret key to connect to Amazon RDS (shorter than aws_secret_key)
         :param str bind_port: local port used for SSH tunneling. Should be different if multiple instances should be run.
@@ -479,7 +488,9 @@ class Dataset:
             ## SSH Tunnel DB connection
             db_username = parsed.netloc.split("@")[0].split(":")[0]
 
-            self.log.debug(f"Connecting to DB (Used local port: {server.local_bind_port})...")
+            self.log.debug(
+                f"Connecting to DB (Used local port: {server.local_bind_port})..."
+            )
             self.conn = await asyncpg.connect(
                 user=db_username,
                 password=token,
@@ -493,8 +504,6 @@ class Dataset:
             self.conn = await asyncpg.connect(url)
             return self.conn
 
-
-
     @copy_doc(connect_async)
     def connect(self, url: str, *args, **kwargs):
         self.conn_url = url
@@ -506,11 +515,9 @@ class Dataset:
         if self.conn:
             return await self.conn.close()
 
-
     @copy_doc(disconnect_async)
     def disconnect(self, *args, **kwargs):
         return run_async(self.disconnect_async(*args, **kwargs))
-
 
     def _check_table(self):
         """Check is table selected for operation"""
@@ -526,7 +533,7 @@ class Dataset:
         assert len(keys) > 0, "At least one key is required"
 
         for key in keys:
-            if not key in self.fields:
+            if key not in self.fields:
                 raise InvalidKeyException(
                     f"Key '{key}' is not exists on table '{self.db}' ({self.fields.keys()})"
                 )
@@ -552,7 +559,6 @@ ORDER BY ordinal_position
 
             res[key] = val
 
-        # res = OrderedDict([('inactive', 'boolean'), ('test_string', 'character varying'), ('identifier', 'character varying'), ('jurisdiction', 'character varying'), ('id1', 'integer'), ('date', 'date'), ('auto_id', 'integer'), ('company_id', 'character varying'), ('name_en', 'character varying'), ('name_native', 'character varying'), ('start_date', 'date'), ('end_date', 'date'), ('role', 'character varying'), ('name', 'character varying')])
         self.log.debug(f"Parsed fields from DB: {res}")
         if not res:
             raise DBEmptyException(f"Table '{self.db}' fields are not found!")
@@ -666,7 +672,7 @@ ORDER BY ordinal_position
 
         if keys and remove_non_keys:  # Remove non selected keys
             for f in fields:
-                if not f in keys and not f in unused_fields:
+                if f not in keys and f not in unused_fields:
                     unused_fields.append(f)
 
         if update_keys:  # Add update keys
@@ -685,13 +691,13 @@ ORDER BY ordinal_position
         # -- Delete unused fields from data
         res_data = []
         for d in data:
-            l = []
+            used_data = []
             for i, elem in enumerate(d):
                 if i in remove_ids:
                     continue
-                l.append(elem)
+                used_data.append(elem)
 
-            res_data.append(l)
+            res_data.append(used_data)
 
         return res_data, fields
 
@@ -713,7 +719,8 @@ ORDER BY ordinal_position
 
     def escapestr(self, tx: str, char: str = '"') -> str:
         """Escape string (column name) by quotes"""
-        esc = lambda x: f"{char}{x}{char}"
+        def esc(x):
+            return f"{char}{x}{char}"
 
         if isinstance(tx, (list, tuple)):
             return list(map(esc, tx))
@@ -731,7 +738,8 @@ ORDER BY ordinal_position
         desc: Optional[str] = None,
     ):
         """
-        Upsert many records in DB. If record not exists, it will be inserted otherwise updated. Required index with UNIQUE for all keys fields altogether
+        Upsert many records in DB. If record not exists, it will be inserted otherwise updated.
+        Required index with UNIQUE for all keys fields altogether
         ### Examples:
         >>> rows = [{'id': 1, 'is_active': True}, {'id': 2, 'is_active': False}]
         >>> db = dataset.connect("postgres://localhost/test")
@@ -866,7 +874,7 @@ WHERE
         data, fields = await self._prepare_data_fields(rows)
 
         expr_set = [
-            await self._field_set(k, fields) for k in fields.keys() if not k in keys
+            await self._field_set(k, fields) for k in fields.keys() if k not in keys
         ]
         expr_where = [await self._field_set(k, fields) for k in keys]
 
@@ -907,7 +915,8 @@ WHERE
         chunk_size: int = 50_000,
         bot: Optional[BotProgressReport] = None,
     ):
-        """Run upsert_many on DB. If record not exists, it will be inserted otherwise updated. Required index with UNIQUE for all keys fields altogether."""
+        """Run upsert_many on DB. If record not exists, it will be inserted otherwise updated.
+        Required index with UNIQUE for all keys fields altogether."""
         assert bot is not None
         self._bot_init(bot)
 
@@ -924,12 +933,12 @@ WHERE
         expr_set = [
             await self._field_set(k, fields)
             for k in fields.keys()
-            if (not update_keys and not k in keys) or (update_keys and k in update_keys)
+            if (not update_keys and k not in keys) or (update_keys and k in update_keys)
         ]
-        expr_where = [await self._field_set(k, fields) for k in keys]
+        # expr_where = [await self._field_set(k, fields) for k in keys]
 
         expr_set_str = ",\n    ".join(expr_set)
-        expr_where_str = "\n    AND ".join(expr_where)
+        # expr_where_str = "\n    AND ".join(expr_where)
         expr_conflict_str = ", ".join(unique_keys or keys)
         fields_str = ", ".join(self.escapestr(list(fields.keys())))
         values_str = ", ".join([f"${i+1}" for i in range(len(fields))])
@@ -945,7 +954,7 @@ ON CONFLICT ({expr_conflict_str}) DO UPDATE
 SET
     {expr_set_str}"""
         else:
-            q += f"""
+            q += """
 ON CONFLICT DO NOTHING
 """
 
@@ -1218,7 +1227,7 @@ WHERE
             try:
                 return self._records_to_dict(r)
             except Exception as e:
-                self.log.error(f"Error processing records_to_dict", exc_info=e)
+                self.log.error("Error processing records_to_dict", exc_info=e)
                 pass
         return r
 
