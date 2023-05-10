@@ -472,14 +472,14 @@ class Dataset:
                 ssh_username=ssh_username,
                 ssh_pkey=ssh_key,  # Can be file name or key string
                 remote_bind_address=(parsed.hostname, parsed.port or default_port),
-                local_bind_address=("0.0.0.0", bind_port or 8621),
+                local_bind_address=("0.0.0.0", bind_port or 0),
             )
             server.start()
 
             ## SSH Tunnel DB connection
             db_username = parsed.netloc.split("@")[0].split(":")[0]
 
-            self.log.debug(f"Connecting to DB...")
+            self.log.debug(f"Connecting to DB (Used local port: {server.local_bind_port})...")
             self.conn = await asyncpg.connect(
                 user=db_username,
                 password=token,
