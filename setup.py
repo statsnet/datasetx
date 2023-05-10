@@ -16,4 +16,5 @@ setup(
         "sshtunnel",
         "aiogram",
     ],
+    python_requires=">3.7",
 )

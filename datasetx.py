@@ -48,7 +48,13 @@ from asyncpg import Record
 from sshtunnel import SSHTunnelForwarder
 import boto3
 from urllib.parse import urlparse
-from typing import Callable, TypeVar, ParamSpec
+
+from typing import Callable
+
+try:
+    from typing import TypeVar, ParamSpec # novm
+except ImportError:
+    from typing_extensions import ParamSpec, TypeVar
 
 warnings.simplefilter("ignore", DeprecationWarning)
 
@@ -140,13 +146,9 @@ class BotProgressReport:
 
     def __init__(self, title: str, total: Optional[int], **kwargs):
         if not self.bot_token:
-            warnings.warn(
-                "BOT_TOKEN environment variable is empty, telegram notifications disabled"
-            )
+            warnings.warn("BOT_TOKEN environment variable is empty, telegram notifications disabled")
         if not self.bot_chat:
-            warnings.warn(
-                "BOT_CHAT environment variable is empty, telegram notifications disabled"
-            )
+            warnings.warn("BOT_CHAT environment variable is empty, telegram notifications disabled")
 
         self.title = title
         self.log.setLevel(os.getenv("LOG_LEVEL", "INFO"))
@@ -213,15 +215,11 @@ class BotProgressReport:
     def _template(self, after: str = "", before: str = ""):
         """Message template"""
         if self.finished_at and self.started_at:
-            last_run_text = (
-                f"*Время завершения*: `{self._format_date(self.finished_at)}`"
-            )
+            last_run_text = f"*Время завершения*: `{self._format_date(self.finished_at)}`"
             timedelta_str = self._timedelta_str(self.finished_at - self.started_at)
             last_run_text += f"\n*Прошло времени*: `{timedelta_str}`"
         else:
-            last_run_text = (
-                f"*Последнее обновление*: `{self._format_date(self._now())}`"
-            )
+            last_run_text = f"*Последнее обновление*: `{self._format_date(self._now())}`"
 
         return f"""
 {before}
@@ -284,9 +282,7 @@ class BotProgressReport:
             # Finish event loop tasks
             if finish_tasks:
                 while len(asyncio.all_tasks()) > finish_tasks_count:
-                    self.log.info(
-                        f"Finishing {len(asyncio.all_tasks()) - finish_tasks_count} tasks..."
-                    )
+                    self.log.info(f"Finishing {len(asyncio.all_tasks()) - finish_tasks_count} tasks...")
                     await asyncio.sleep(1)
 
     async def update(self, count: int):
@@ -389,9 +385,7 @@ class Dataset:
     title: Optional[str] = None  # Task title in telegram bot
     bot_enable: bool = True  # Enable bot notifications
 
-    def __init__(
-        self, log_level: Optional[str] = None, title: Optional[str] = None
-    ) -> None:
+    def __init__(self, log_level: Optional[str] = None, title: Optional[str] = None) -> None:
         self.log = logging.getLogger("Dataset")
         self.log.setLevel(log_level or "INFO")
         if title:
@@ -452,9 +446,7 @@ class Dataset:
         """
         if ssh_address:  # SSH tunnel
             if not all([ssh_address, ssh_username, ssh_key]):
-                raise RuntimeError(
-                    "ssh_address, ssh_username and ssh_key are required for SSH tunnel!"
-                )
+                raise RuntimeError("ssh_address, ssh_username and ssh_key are required for SSH tunnel!")
             self.log.debug("Connecting to SSH Tunnel...")
             parsed = urlparse(url)
             default_port = 5432
@@ -488,9 +480,7 @@ class Dataset:
             ## SSH Tunnel DB connection
             db_username = parsed.netloc.split("@")[0].split(":")[0]
 
-            self.log.debug(
-                f"Connecting to DB (Used local port: {server.local_bind_port})..."
-            )
+            self.log.debug(f"Connecting to DB (Used local port: {server.local_bind_port})...")
             self.conn = await asyncpg.connect(
                 user=db_username,
                 password=token,
@@ -534,9 +524,7 @@ class Dataset:
 
         for key in keys:
             if key not in self.fields:
-                raise InvalidKeyException(
-                    f"Key '{key}' is not exists on table '{self.db}' ({self.fields.keys()})"
-                )
+                raise InvalidKeyException(f"Key '{key}' is not exists on table '{self.db}' ({self.fields.keys()})")
 
         return keys
 
@@ -604,14 +592,10 @@ ORDER BY ordinal_position
         elif field_type.startswith("bool"):
             return bool(val)
         elif field_type in ["array"]:
-            assert isinstance(
-                val, (list, tuple)
-            ), f"Invalid type '{field_type}' of ({val})"
+            assert isinstance(val, (list, tuple)), f"Invalid type '{field_type}' of ({val})"
             return val
         elif field_type in ["json", "jsonb"]:
-            assert isinstance(
-                val, (list, tuple, dict)
-            ), f"Invalid type '{field_type}' of ({val})"
+            assert isinstance(val, (list, tuple, dict)), f"Invalid type '{field_type}' of ({val})"
             return json.dumps(val, ensure_ascii=False)
 
         ## Unknown / ignored
@@ -636,16 +620,12 @@ ORDER BY ordinal_position
                     continue
 
                 try:
-                    val = await self._convert_value(
-                        row[field_name], field_type.lower(), field_name
-                    )
+                    val = await self._convert_value(row[field_name], field_type.lower(), field_name)
                 except TypeError as exc:
                     raise FieldSerializationException() from exc
                 r.append(val)
 
-                if field_name in unused_fields and (
-                    val is not None or val in self.force_fields
-                ):
+                if field_name in unused_fields and (val is not None or val in self.force_fields):
                     unused_fields.remove(field_name)
 
             res.append(r)
@@ -719,6 +699,7 @@ ORDER BY ordinal_position
 
     def escapestr(self, tx: str, char: str = '"') -> str:
         """Escape string (column name) by quotes"""
+
         def esc(x):
             return f"{char}{x}{char}"
 
@@ -803,9 +784,7 @@ ORDER BY ordinal_position
         data = [filters.get(k) or values.get(k) for k in fields_all]
 
         expr_set = [await self._field_set(k, fields_all) for k in fields_values.keys()]
-        expr_where = [
-            await self._field_set(k, fields_all) for k in fields_filters.keys()
-        ]
+        expr_where = [await self._field_set(k, fields_all) for k in fields_filters.keys()]
 
         expr_set_str = ",\n    ".join(expr_set)
         expr_where_str = "\n    AND ".join(expr_where)
@@ -873,9 +852,7 @@ WHERE
         await self._check_keys(keys)
         data, fields = await self._prepare_data_fields(rows)
 
-        expr_set = [
-            await self._field_set(k, fields) for k in fields.keys() if k not in keys
-        ]
+        expr_set = [await self._field_set(k, fields) for k in fields.keys() if k not in keys]
         expr_where = [await self._field_set(k, fields) for k in keys]
 
         expr_set_str = ",\n    ".join(expr_set)
@@ -1098,11 +1075,7 @@ VALUES ({values_str})
         fields_filters = {k: v for k, v in self.fields.items() if k in filters}
 
         fields_str = ", ".join(self.escapestr(list(keys)))
-        expr_where = [
-            await self._field_set(k, fields_filters)
-            for k in self.fields.keys()
-            if k in filters
-        ]
+        expr_where = [await self._field_set(k, fields_filters) for k in self.fields.keys() if k in filters]
         expr_where_str = where if where else "\n    AND ".join(expr_where)
 
         q = f"""
@@ -1172,9 +1145,7 @@ LIMIT {limit}"""
         self.fields = await self._get_fields()
         keys = await self._check_keys(keys)
         # data, unused_fields = await self._prepare_data(filters)
-        data, fields = await self._prepare_data_fields(
-            filters, keys, remove_non_keys=True
-        )
+        data, fields = await self._prepare_data_fields(filters, keys, remove_non_keys=True)
         fields_filters = {k: v for k, v in self.fields.items() if k in keys}
 
         expr_where = [await self._field_set(k, fields_filters) for k in keys]
@@ -1205,10 +1176,10 @@ WHERE
 
         return res
 
-    def _records_to_dict(self, records: list[Record]):
+    def _records_to_dict(self, records: List[Record]):
         return [dict(rec) for rec in records]
 
-    def query(self, sql: str, values: list[Any] = [], asdict: bool = True):
+    def query(self, sql: str, values: List[Any] = [], asdict: bool = True):
         """
         Perform raw SQL query
         ### Examples:
@@ -1218,7 +1189,7 @@ WHERE
         return run_async(self.query_async(sql, values, asdict))
 
     @copy_doc(query)
-    async def query_async(self, sql: str, values: list[Any] = [], asdict: bool = True):
+    async def query_async(self, sql: str, values: List[Any] = [], asdict: bool = True):
         assert self.conn is not None
         r = await self.conn.fetch(sql, *values)
 
@@ -1231,7 +1202,7 @@ WHERE
                 pass
         return r
 
-    def execute(self, sql: str, values: list[Any] = []):
+    def execute(self, sql: str, values: List[Any] = []):
         """
         Perform raw SQL execute
         ### Examples:
@@ -1241,7 +1212,7 @@ WHERE
         return run_async(self.execute_async(sql, values))
 
     @copy_doc(execute)
-    async def execute_async(self, sql: str, values: list[Any] = []):
+    async def execute_async(self, sql: str, values: List[Any] = []):
         assert self.conn is not None
         r = await self.conn.execute(sql, *values)
         return r
