@@ -52,16 +52,16 @@ from urllib.parse import urlparse
 from typing import Callable, TypeVar
 
 try:
-    from typing import ParamSpec # novm
+    from typing import ParamSpec  # novm
 except ImportError:
     from typing_extensions import ParamSpec
 
 warnings.simplefilter("ignore", DeprecationWarning)
 
-logging.basicConfig()
 
 dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path)
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
 
 P = ParamSpec("P")
