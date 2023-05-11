@@ -49,12 +49,12 @@ from sshtunnel import SSHTunnelForwarder
 import boto3
 from urllib.parse import urlparse
 
-from typing import Callable
+from typing import Callable, TypeVar
 
 try:
-    from typing import TypeVar, ParamSpec # novm
+    from typing import ParamSpec # novm
 except ImportError:
-    from typing_extensions import ParamSpec, TypeVar
+    from typing_extensions import ParamSpec
 
 warnings.simplefilter("ignore", DeprecationWarning)
 
