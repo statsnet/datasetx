@@ -61,7 +61,9 @@ warnings.simplefilter("ignore", DeprecationWarning)
 
 dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path)
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+
+DEFAULT_LOG_LEVEL = "warning"
+logging.basicConfig(level=os.getenv("LOG_LEVEL", DEFAULT_LOG_LEVEL))
 
 
 P = ParamSpec("P")
@@ -151,7 +153,7 @@ class BotProgressReport:
             warnings.warn("BOT_CHAT environment variable is empty, telegram notifications disabled")
 
         self.title = title
-        self.log.setLevel(os.getenv("LOG_LEVEL", "INFO"))
+        self.log.setLevel(os.getenv("LOG_LEVEL", kwargs.get("LOG_LEVEL", DEFAULT_LOG_LEVEL)))
 
         self.callback = _WrapCallback(self._tqdm_callback)
 
@@ -1223,4 +1225,9 @@ WHERE
 def connect(url: str, *args, log_level: Optional[str] = None, **kwargs):
     ds = Dataset(log_level=log_level)
     ds.connect(url, *args, **kwargs)
+    return ds
+
+async def connect_async(url: str, *args, log_level: Optional[str] = None, **kwargs):
+    ds = Dataset(log_level=log_level)
+    await ds.connect_async(url, *args, **kwargs)
     return ds
