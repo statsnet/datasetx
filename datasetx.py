@@ -146,11 +146,7 @@ class BotProgressReport:
     timezone = None
     log = logging.getLogger("BotProgress")
 
-    def __init__(self, title: str, total: Optional[int], **kwargs):
-        if not self.bot_token:
-            warnings.warn("BOT_TOKEN environment variable is empty, telegram notifications disabled")
-        if not self.bot_chat:
-            warnings.warn("BOT_CHAT environment variable is empty, telegram notifications disabled")
+    def __init__(self, title: str, total: Optional[int], auto_init: bool = False, **kwargs):
 
         self.title = title
         self.log.setLevel(os.getenv("LOG_LEVEL", kwargs.get("LOG_LEVEL", DEFAULT_LOG_LEVEL)))
@@ -171,7 +167,8 @@ class BotProgressReport:
         self.pbar = tqdm_asyncio(**params)
         if total:
             self.set_total(total)
-        self._init()
+        if auto_init:
+            self._init()
 
         raw_timezone = os.getenv("TIMEZONE", "UTC")
         try:
@@ -186,6 +183,10 @@ class BotProgressReport:
     def _init(self):
         if not self._is_enabled:
             return
+        if not self.bot_token:
+            warnings.warn("BOT_TOKEN environment variable is empty, telegram notifications disabled")
+        if not self.bot_chat:
+            warnings.warn("BOT_CHAT environment variable is empty, telegram notifications disabled")
 
         assert self.bot_token is not None, "Bot token is required"
         self.bot = Bot(token=self.bot_token, parse_mode="MarkdownV2")
@@ -386,12 +387,18 @@ class Dataset:
     dryrun = False  # Run in dry mode, just print query
     title: Optional[str] = None  # Task title in telegram bot
     bot_enable: bool = True  # Enable bot notifications
+    bot_token: Optional[str] = None
+    bot_chat: Optional[str] = None
 
-    def __init__(self, log_level: Optional[str] = None, title: Optional[str] = None) -> None:
+    def __init__(self, log_level: Optional[str] = None, title: Optional[str] = None, bot_token: Optional[str] = None, bot_chat: Optional[str] = None) -> None:
         self.log = logging.getLogger("Dataset")
         self.log.setLevel(log_level or "INFO")
         if title:
             self.title = title
+        if bot_token:
+            self.bot_token = bot_token
+        if bot_chat:
+            self.bot_chat = bot_chat
 
     def set_title(self, title: str):
         """Set bot notification title"""
@@ -401,6 +408,9 @@ class Dataset:
 
     def _bot_init(self, bot: BotProgressReport):
         bot.enable = self.bot_enable
+        bot.bot_token = self.bot_token
+        bot.bot_chat = self.bot_chat
+        bot._init()
         if bot.title:
             if self.title:
                 bot.title += f" - {self.db} ({self.title})"
@@ -1223,7 +1233,7 @@ WHERE
 # @copy_doc(Dataset.connect_async)
 # @copy_kwargs(Dataset.connect_async, Dataset)
 def connect(url: str, *args, log_level: Optional[str] = None, **kwargs):
-    ds = Dataset(log_level=log_level)
+    ds = Dataset(log_level=log_level, bot_token=kwargs.pop("bot_token"), bot_chat=kwargs.pop("bot_chat"))
     ds.connect(url, *args, **kwargs)
     return ds
 
