@@ -62,7 +62,7 @@ warnings.simplefilter("ignore", DeprecationWarning)
 dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path)
 
-DEFAULT_LOG_LEVEL = "warning"
+DEFAULT_LOG_LEVEL = "WARNING"
 logging.basicConfig(level=os.getenv("LOG_LEVEL", DEFAULT_LOG_LEVEL))
 
 
