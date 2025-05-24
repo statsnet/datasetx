@@ -17,6 +17,7 @@ table.upsert_many(rows, ["key1", "key2"])
 
 import asyncio
 import functools
+import io
 import json
 import logging
 import os
@@ -25,23 +26,58 @@ import warnings
 from collections import OrderedDict
 from copy import copy
 from datetime import datetime, timedelta
-from typing import Any, Coroutine, Iterable, List, Optional, Tuple
+from typing import (
+    Any,
+    Coroutine,
+    Iterable,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
 
 import asyncpg
-from aiogram.bot import Bot
+from aiogram import Bot
 from asyncpg.connection import Connection
 from dotenv import load_dotenv
+import paramiko
 from pytz import UnknownTimeZoneError, timezone
 from tqdm import tqdm
 from tqdm.asyncio import tqdm_asyncio
 from asyncpg import Record
+from sshtunnel import SSHTunnelForwarder
+import boto3
+from urllib.parse import urlparse
+
+from typing import Callable, TypeVar
+
+try:
+    from typing import ParamSpec  # novm
+except ImportError:
+    from typing_extensions import ParamSpec
 
 warnings.simplefilter("ignore", DeprecationWarning)
 
-logging.basicConfig()
 
 dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path)
+
+DEFAULT_LOG_LEVEL = "WARNING"
+logging.basicConfig(level=os.getenv("LOG_LEVEL", DEFAULT_LOG_LEVEL))
+
+
+P = ParamSpec("P")
+T = TypeVar("T")
+
+
+def copy_doc(wrapper: Callable[P, T]):
+    """Copy function docstring"""
+
+    def decorator(func: Callable) -> Callable[P, T]:
+        func.__doc__ = wrapper.__doc__
+        return func
+
+    return decorator
 
 
 class DatasetException(ValueError):
@@ -110,18 +146,10 @@ class BotProgressReport:
     timezone = None
     log = logging.getLogger("BotProgress")
 
-    def __init__(self, title: str, total: Optional[int], **kwargs):
-        if not self.bot_token:
-            warnings.warn(
-                "BOT_TOKEN environment variable is empty, telegram notifications disabled"
-            )
-        if not self.bot_chat:
-            warnings.warn(
-                "BOT_CHAT environment variable is empty, telegram notifications disabled"
-            )
+    def __init__(self, title: str, total: Optional[int], auto_init: bool = False, **kwargs):
 
         self.title = title
-        self.log.setLevel(os.getenv("LOG_LEVEL", "INFO"))
+        self.log.setLevel(os.getenv("LOG_LEVEL", kwargs.get("LOG_LEVEL", DEFAULT_LOG_LEVEL)))
 
         self.callback = _WrapCallback(self._tqdm_callback)
 
@@ -134,12 +162,13 @@ class BotProgressReport:
                 "unit_scale": True,
             }
         )
-        if not "mininterval" in params:
+        if "mininterval" not in params:
             params["mininterval"] = int(os.getenv("MININTERVAL", 2))
         self.pbar = tqdm_asyncio(**params)
         if total:
             self.set_total(total)
-        self._init()
+        if auto_init:
+            self._init()
 
         raw_timezone = os.getenv("TIMEZONE", "UTC")
         try:
@@ -154,6 +183,10 @@ class BotProgressReport:
     def _init(self):
         if not self._is_enabled:
             return
+        if not self.bot_token:
+            warnings.warn("BOT_TOKEN environment variable is empty, telegram notifications disabled")
+        if not self.bot_chat:
+            warnings.warn("BOT_CHAT environment variable is empty, telegram notifications disabled")
 
         assert self.bot_token is not None, "Bot token is required"
         self.bot = Bot(token=self.bot_token, parse_mode="MarkdownV2")
@@ -185,15 +218,11 @@ class BotProgressReport:
     def _template(self, after: str = "", before: str = ""):
         """Message template"""
         if self.finished_at and self.started_at:
-            last_run_text = (
-                f"*Время завершения*: `{self._format_date(self.finished_at)}`"
-            )
+            last_run_text = f"*Время завершения*: `{self._format_date(self.finished_at)}`"
             timedelta_str = self._timedelta_str(self.finished_at - self.started_at)
             last_run_text += f"\n*Прошло времени*: `{timedelta_str}`"
         else:
-            last_run_text = (
-                f"*Последнее обновление*: `{self._format_date(self._now())}`"
-            )
+            last_run_text = f"*Последнее обновление*: `{self._format_date(self._now())}`"
 
         return f"""
 {before}
@@ -256,9 +285,7 @@ class BotProgressReport:
             # Finish event loop tasks
             if finish_tasks:
                 while len(asyncio.all_tasks()) > finish_tasks_count:
-                    self.log.info(
-                        f"Finishing {len(asyncio.all_tasks()) - finish_tasks_count} tasks..."
-                    )
+                    self.log.info(f"Finishing {len(asyncio.all_tasks()) - finish_tasks_count} tasks...")
                     await asyncio.sleep(1)
 
     async def update(self, count: int):
@@ -337,14 +364,6 @@ def progress_decorator(title: str):
     return wrapper
 
 
-def connect(url: str, *args, log_level: Optional[str] = None, **kwargs):
-    """Connect to PostgreSQL DB"""
-
-    ds = Dataset(log_level=log_level)
-    ds.connect(url, *args, **kwargs)
-    return ds
-
-
 def run_async(func: Coroutine):
     """Run async command as sync"""
     loop = asyncio.get_event_loop()
@@ -368,14 +387,18 @@ class Dataset:
     dryrun = False  # Run in dry mode, just print query
     title: Optional[str] = None  # Task title in telegram bot
     bot_enable: bool = True  # Enable bot notifications
+    bot_token: Optional[str] = None
+    bot_chat: Optional[str] = None
 
-    def __init__(
-        self, log_level: Optional[str] = None, title: Optional[str] = None
-    ) -> None:
+    def __init__(self, log_level: Optional[str] = None, title: Optional[str] = None, bot_token: Optional[str] = None, bot_chat: Optional[str] = None) -> None:
         self.log = logging.getLogger("Dataset")
         self.log.setLevel(log_level or "INFO")
         if title:
             self.title = title
+        if bot_token:
+            self.bot_token = bot_token
+        if bot_chat:
+            self.bot_chat = bot_chat
 
     def set_title(self, title: str):
         """Set bot notification title"""
@@ -385,6 +408,9 @@ class Dataset:
 
     def _bot_init(self, bot: BotProgressReport):
         bot.enable = self.bot_enable
+        bot.bot_token = self.bot_token
+        bot.bot_chat = self.bot_chat
+        bot._init()
         if bot.title:
             if self.title:
                 bot.title += f" - {self.db} ({self.title})"
@@ -404,28 +430,99 @@ class Dataset:
         cls.db = name
         return cls
 
+    async def connect_async(
+        self,
+        url: str,
+        ssh_address: Optional[Union[Tuple[str, int], str]] = None,
+        ssh_username: Optional[str] = None,
+        ssh_key: Optional[str] = None,
+        aws_region: str = "eu-north-1",
+        aws_profile: Optional[str] = None,
+        aws_secret_key: Optional[str] = None,
+        aws_secret_id: Optional[str] = None,
+        bind_port: Optional[int] = None,
+    ) -> Connection:
+        """
+        Connect to PostgreSQL DB
+
+        :param str url: URL for connecting to postgresql in format: postgres://user:pass@host:port/database
+        :param str ssh_address: address to connect to Amazon RDS SSH forwarding server. If set, ssh tunnel will be used.
+        :param str ssh_username: username to connect to Amazon RDS
+        :param str ssh_key: path to the private SSH key or SSH key contents
+        :param str aws_region: AWS region
+        :params str aws_profile: can be used as replace for aws* settings.
+        [boto3 docs](https://boto3.amazonaws.com/v1/documentation/api/latest/guide/credentials.html#configuring-credentials)
+        :param str aws_secret_key: secret key to connect to Amazon RDS
+        :param str aws_secret_id: secret key to connect to Amazon RDS (shorter than aws_secret_key)
+        :param str bind_port: local port used for SSH tunneling. Should be different if multiple instances should be run.
+        """
+        if ssh_address:  # SSH tunnel
+            if not all([ssh_address, ssh_username, ssh_key]):
+                raise RuntimeError("ssh_address, ssh_username and ssh_key are required for SSH tunnel!")
+            self.log.debug("Connecting to SSH Tunnel...")
+            parsed = urlparse(url)
+            default_port = 5432
+
+            if not os.path.exists(ssh_key):
+                ssh_key = paramiko.RSAKey.from_private_key(io.StringIO(ssh_key))
+
+            session = boto3.Session(
+                profile_name=aws_profile,
+                aws_secret_access_key=aws_secret_key,
+                aws_access_key_id=aws_secret_id,
+                region_name=aws_region,
+            )
+            client = session.client("rds")
+            token = client.generate_db_auth_token(
+                DBHostname=parsed.hostname,
+                Port=parsed.port or default_port,
+                DBUsername=parsed.username,
+                Region=aws_region,
+            )
+
+            server = SSHTunnelForwarder(
+                ssh_address_or_host=ssh_address,
+                ssh_username=ssh_username,
+                ssh_pkey=ssh_key,  # Can be file name or key string
+                remote_bind_address=(parsed.hostname, parsed.port or default_port),
+                local_bind_address=("0.0.0.0", bind_port or 0),
+            )
+            server.start()
+
+            ## SSH Tunnel DB connection
+            db_username = parsed.netloc.split("@")[0].split(":")[0]
+
+            self.log.debug(f"Connecting to DB (Used local port: {server.local_bind_port})...")
+            self.conn = await asyncpg.connect(
+                user=db_username,
+                password=token,
+                host="localhost",
+                port=server.local_bind_port,
+                database=parsed.path[1:],
+            )
+            return self.conn
+        else:
+            self.log.debug("Connecting to DB...")
+            self.conn = await asyncpg.connect(url)
+            return self.conn
+
+    @copy_doc(connect_async)
     def connect(self, url: str, *args, **kwargs):
-        """Run connect_async in run_async"""
         self.conn_url = url
         return run_async(self.connect_async(url, *args, **kwargs))
 
-    def disconnect(self, *args, **kwargs):
-        """Run disconnect_async in run_async"""
-        return run_async(self.disconnect_async(*args, **kwargs))
-
-    async def connect_async(self, url: str) -> Connection:
-        """Connect to PostreSQL DB"""
-        self.log.debug("Connecting to DB...")
-        self.conn = await asyncpg.connect(url)
-        return self.conn
-
     async def disconnect_async(self):
+        """Disconnect from DB. Recommended, but not required"""
         self.log.debug("Disconnecting from DB")
         if self.conn:
             return await self.conn.close()
 
+    @copy_doc(disconnect_async)
+    def disconnect(self, *args, **kwargs):
+        return run_async(self.disconnect_async(*args, **kwargs))
+
     def _check_table(self):
-        """Check is table selected"""
+        """Check is table selected for operation"""
         if not self.db:
             raise DBEmptyException("Call dataset.connection()['table_name'] ")
 
@@ -438,15 +535,13 @@ class Dataset:
         assert len(keys) > 0, "At least one key is required"
 
         for key in keys:
-            if not key in self.fields:
-                raise InvalidKeyException(
-                    f"Key '{key}' is not exists on table '{self.db}' ({self.fields.keys()})"
-                )
+            if key not in self.fields:
+                raise InvalidKeyException(f"Key '{key}' is not exists on table '{self.db}' ({self.fields.keys()})")
 
         return keys
 
     async def _get_fields(self) -> "OrderedDict[str, str]":
-        """Get dict of DB fields {name: field_type}"""
+        """Get dict of DB fields. Output format: {name: field_type}"""
         self._check_table()
         q = f"""
 SELECT column_name, data_type FROM information_schema.columns
@@ -464,7 +559,6 @@ ORDER BY ordinal_position
 
             res[key] = val
 
-        # res = OrderedDict([('inactive', 'boolean'), ('test_string', 'character varying'), ('identifier', 'character varying'), ('jurisdiction', 'character varying'), ('id1', 'integer'), ('date', 'date'), ('auto_id', 'integer'), ('company_id', 'character varying'), ('name_en', 'character varying'), ('name_native', 'character varying'), ('start_date', 'date'), ('end_date', 'date'), ('role', 'character varying'), ('name', 'character varying')])
         self.log.debug(f"Parsed fields from DB: {res}")
         if not res:
             raise DBEmptyException(f"Table '{self.db}' fields are not found!")
@@ -479,10 +573,6 @@ ORDER BY ordinal_position
             except ValueError:
                 pass
         raise ValueError(f"Invalid date format: '{val}'")
-
-    # async def _iter_array_type(self, val: Iterable, field_type: str):
-    #     for item in val:
-    #         yield self._convert_value(item, field_type)
 
     async def _convert_value(self, val: Any, field_type: str, field_name: str) -> Any:
         """Convert passed value to DB field type"""
@@ -514,14 +604,10 @@ ORDER BY ordinal_position
         elif field_type.startswith("bool"):
             return bool(val)
         elif field_type in ["array"]:
-            assert isinstance(
-                val, (list, tuple)
-            ), f"Invalid type '{field_type}' of ({val})"
+            assert isinstance(val, (list, tuple)), f"Invalid type '{field_type}' of ({val})"
             return val
         elif field_type in ["json", "jsonb"]:
-            assert isinstance(
-                val, (list, tuple, dict)
-            ), f"Invalid type '{field_type}' of ({val})"
+            assert isinstance(val, (list, tuple, dict)), f"Invalid type '{field_type}' of ({val})"
             return json.dumps(val, ensure_ascii=False)
 
         ## Unknown / ignored
@@ -534,7 +620,7 @@ ORDER BY ordinal_position
         return val
 
     async def _prepare_data(self, rows: List[dict]) -> Tuple[List[Any], List[str]]:
-        """Prepare data for DB (convert rows dict to list)"""
+        """Prepare data for DB (convert rows dict to DB argument list)"""
         res = []
         unused_fields = list(self.fields.keys())
 
@@ -546,16 +632,12 @@ ORDER BY ordinal_position
                     continue
 
                 try:
-                    val = await self._convert_value(
-                        row[field_name], field_type.lower(), field_name
-                    )
+                    val = await self._convert_value(row[field_name], field_type.lower(), field_name)
                 except TypeError as exc:
                     raise FieldSerializationException() from exc
                 r.append(val)
 
-                if field_name in unused_fields and (
-                    val is not None or val in self.force_fields
-                ):
+                if field_name in unused_fields and (val is not None or val in self.force_fields):
                     unused_fields.remove(field_name)
 
             res.append(r)
@@ -582,7 +664,7 @@ ORDER BY ordinal_position
 
         if keys and remove_non_keys:  # Remove non selected keys
             for f in fields:
-                if not f in keys and not f in unused_fields:
+                if f not in keys and f not in unused_fields:
                     unused_fields.append(f)
 
         if update_keys:  # Add update keys
@@ -601,13 +683,13 @@ ORDER BY ordinal_position
         # -- Delete unused fields from data
         res_data = []
         for d in data:
-            l = []
+            used_data = []
             for i, elem in enumerate(d):
                 if i in remove_ids:
                     continue
-                l.append(elem)
+                used_data.append(elem)
 
-            res_data.append(l)
+            res_data.append(used_data)
 
         return res_data, fields
 
@@ -629,7 +711,9 @@ ORDER BY ordinal_position
 
     def escapestr(self, tx: str, char: str = '"') -> str:
         """Escape string (column name) by quotes"""
-        esc = lambda x: f"{char}{x}{char}"
+
+        def esc(x):
+            return f"{char}{x}{char}"
 
         if isinstance(tx, (list, tuple)):
             return list(map(esc, tx))
@@ -647,7 +731,8 @@ ORDER BY ordinal_position
         desc: Optional[str] = None,
     ):
         """
-        Upsert many records in DB. If record not exists, it will be inserted otherwise updated. Required index with UNIQUE for all keys fields altogether
+        Upsert many records in DB. If record not exists, it will be inserted otherwise updated.
+        Required index with UNIQUE for all keys fields altogether
         ### Examples:
         >>> rows = [{'id': 1, 'is_active': True}, {'id': 2, 'is_active': False}]
         >>> db = dataset.connect("postgres://localhost/test")
@@ -681,6 +766,7 @@ ORDER BY ordinal_position
         """
         return run_async(self.update_many_filter_async(filters, values, chunk_size))
 
+    @copy_doc(update_many_filter)
     @progress_decorator("update_many_filter")
     async def update_many_filter_async(
         self,
@@ -710,9 +796,7 @@ ORDER BY ordinal_position
         data = [filters.get(k) or values.get(k) for k in fields_all]
 
         expr_set = [await self._field_set(k, fields_all) for k in fields_values.keys()]
-        expr_where = [
-            await self._field_set(k, fields_all) for k in fields_filters.keys()
-        ]
+        expr_where = [await self._field_set(k, fields_all) for k in fields_filters.keys()]
 
         expr_set_str = ",\n    ".join(expr_set)
         expr_where_str = "\n    AND ".join(expr_where)
@@ -763,6 +847,7 @@ WHERE
             self.set_desc(desc)
         return run_async(self.update_many_async(rows, keys, chunk_size))
 
+    @copy_doc(update_many)
     @progress_decorator("update_many")
     async def update_many_async(
         self,
@@ -779,9 +864,7 @@ WHERE
         await self._check_keys(keys)
         data, fields = await self._prepare_data_fields(rows)
 
-        expr_set = [
-            await self._field_set(k, fields) for k in fields.keys() if not k in keys
-        ]
+        expr_set = [await self._field_set(k, fields) for k in fields.keys() if k not in keys]
         expr_where = [await self._field_set(k, fields) for k in keys]
 
         expr_set_str = ",\n    ".join(expr_set)
@@ -821,7 +904,8 @@ WHERE
         chunk_size: int = 50_000,
         bot: Optional[BotProgressReport] = None,
     ):
-        """Run upsert_many on DB. If record not exists, it will be inserted otherwise updated. Required index with UNIQUE for all keys fields altogether."""
+        """Run upsert_many on DB. If record not exists, it will be inserted otherwise updated.
+        Required index with UNIQUE for all keys fields altogether."""
         assert bot is not None
         self._bot_init(bot)
 
@@ -838,12 +922,12 @@ WHERE
         expr_set = [
             await self._field_set(k, fields)
             for k in fields.keys()
-            if (not update_keys and not k in keys) or (update_keys and k in update_keys)
+            if (not update_keys and k not in keys) or (update_keys and k in update_keys)
         ]
-        expr_where = [await self._field_set(k, fields) for k in keys]
+        # expr_where = [await self._field_set(k, fields) for k in keys]
 
         expr_set_str = ",\n    ".join(expr_set)
-        expr_where_str = "\n    AND ".join(expr_where)
+        # expr_where_str = "\n    AND ".join(expr_where)
         expr_conflict_str = ", ".join(unique_keys or keys)
         fields_str = ", ".join(self.escapestr(list(fields.keys())))
         values_str = ", ".join([f"${i+1}" for i in range(len(fields))])
@@ -859,7 +943,7 @@ ON CONFLICT ({expr_conflict_str}) DO UPDATE
 SET
     {expr_set_str}"""
         else:
-            q += f"""
+            q += """
 ON CONFLICT DO NOTHING
 """
 
@@ -988,6 +1072,7 @@ VALUES ({values_str})
         """
         return run_async(self.select_async(keys, {}, where=where, limit=limit))
 
+    @copy_doc(select)
     async def select_async(
         self,
         keys: List[str],
@@ -1002,11 +1087,7 @@ VALUES ({values_str})
         fields_filters = {k: v for k, v in self.fields.items() if k in filters}
 
         fields_str = ", ".join(self.escapestr(list(keys)))
-        expr_where = [
-            await self._field_set(k, fields_filters)
-            for k in self.fields.keys()
-            if k in filters
-        ]
+        expr_where = [await self._field_set(k, fields_filters) for k in self.fields.keys() if k in filters]
         expr_where_str = where if where else "\n    AND ".join(expr_where)
 
         q = f"""
@@ -1060,6 +1141,7 @@ LIMIT {limit}"""
             self.set_desc(desc)
         return run_async(self.delete_many_async(keys, filters, chunk_size))
 
+    @copy_doc(delete_many)
     @progress_decorator("delete_many")
     async def delete_many_async(
         self,
@@ -1075,9 +1157,7 @@ LIMIT {limit}"""
         self.fields = await self._get_fields()
         keys = await self._check_keys(keys)
         # data, unused_fields = await self._prepare_data(filters)
-        data, fields = await self._prepare_data_fields(
-            filters, keys, remove_non_keys=True
-        )
+        data, fields = await self._prepare_data_fields(filters, keys, remove_non_keys=True)
         fields_filters = {k: v for k, v in self.fields.items() if k in keys}
 
         expr_where = [await self._field_set(k, fields_filters) for k in keys]
@@ -1108,10 +1188,10 @@ WHERE
 
         return res
 
-    def _records_to_dict(self, records: list[Record]):
+    def _records_to_dict(self, records: List[Record]):
         return [dict(rec) for rec in records]
 
-    def query(self, sql: str, values: list[Any] = [], asdict: bool = True):
+    def query(self, sql: str, values: List[Any] = [], asdict: bool = True):
         """
         Perform raw SQL query
         ### Examples:
@@ -1120,7 +1200,8 @@ WHERE
         """
         return run_async(self.query_async(sql, values, asdict))
 
-    async def query_async(self, sql: str, values: list[Any] = [], asdict: bool = True):
+    @copy_doc(query)
+    async def query_async(self, sql: str, values: List[Any] = [], asdict: bool = True):
         assert self.conn is not None
         r = await self.conn.fetch(sql, *values)
 
@@ -1129,11 +1210,11 @@ WHERE
             try:
                 return self._records_to_dict(r)
             except Exception as e:
-                self.log.error(f"Error processing records_to_dict", exc_info=e)
+                self.log.error("Error processing records_to_dict", exc_info=e)
                 pass
         return r
 
-    def execute(self, sql: str, values: list[Any] = []):
+    def execute(self, sql: str, values: List[Any] = []):
         """
         Perform raw SQL execute
         ### Examples:
@@ -1142,7 +1223,21 @@ WHERE
         """
         return run_async(self.execute_async(sql, values))
 
-    async def execute_async(self, sql: str, values: list[Any] = []):
+    @copy_doc(execute)
+    async def execute_async(self, sql: str, values: List[Any] = []):
         assert self.conn is not None
         r = await self.conn.execute(sql, *values)
         return r
+
+
+# @copy_doc(Dataset.connect_async)
+# @copy_kwargs(Dataset.connect_async, Dataset)
+def connect(url: str, *args, log_level: Optional[str] = None, **kwargs):
+    ds = Dataset(log_level=log_level, bot_token=kwargs.pop("bot_token"), bot_chat=kwargs.pop("bot_chat"))
+    ds.connect(url, *args, **kwargs)
+    return ds
+
+async def connect_async(url: str, *args, log_level: Optional[str] = None, **kwargs):
+    ds = Dataset(log_level=log_level)
+    await ds.connect_async(url, *args, **kwargs)
+    return ds
