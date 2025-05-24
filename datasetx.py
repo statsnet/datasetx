@@ -37,7 +37,7 @@ from typing import (
 )
 
 import asyncpg
-from aiogram.bot import Bot
+from aiogram import Bot
 from asyncpg.connection import Connection
 from dotenv import load_dotenv
 import paramiko
