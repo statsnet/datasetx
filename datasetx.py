@@ -38,6 +38,7 @@ from typing import (
 
 import asyncpg
 from aiogram import Bot
+from aiogram.client.default import DefaultBotProperties
 from asyncpg.connection import Connection
 from dotenv import load_dotenv
 import paramiko
@@ -189,7 +190,7 @@ class BotProgressReport:
             warnings.warn("BOT_CHAT environment variable is empty, telegram notifications disabled")
 
         assert self.bot_token is not None, "Bot token is required"
-        self.bot = Bot(token=self.bot_token, parse_mode="MarkdownV2")
+        self.bot = Bot(token=self.bot_token, default=DefaultBotProperties(parse_mode="MarkdownV2"))
 
     def _now(self) -> datetime:
         return datetime.now(tz=self.timezone)
